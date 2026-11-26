@@ -1,5 +1,5 @@
 {
-  "github_repository": "vmlive/Hebei-IPTV-EPG-and-PLAYLIST",
+  "github_repository": "vmlive/HBIPTV-EPG",
   "providers": {
     "telecom": {
       "enabled": true,

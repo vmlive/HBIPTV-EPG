@@ -108,7 +108,7 @@ class SmokeTest(unittest.TestCase):
                 self.assertEqual(xml.findtext("programme/title"), "早间 & 新闻")
                 self.assertTrue(xml.find("programme").get("start").endswith(" +0800"))
                 playlist = (output / "rtp2http.m3u").read_text()
-                self.assertIn(f"https://raw.githubusercontent.com/vmlive/Hebei-IPTV-EPG-and-PLAYLIST/epg-data/{name}/PL.xml.gz", playlist)
+                self.assertIn(f"https://raw.githubusercontent.com/vmlive/HBIPTV-EPG/epg-data/{name}/PL.xml.gz", playlist)
                 self.assertIn("rtp://239.1.2.3:1234", playlist)
                 self.assertTrue((output / "logo/101.png").is_file())
 

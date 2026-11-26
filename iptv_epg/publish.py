@@ -12,7 +12,7 @@ TOKEN_FILE = Path("/run/iptv-secrets/github-token")
 
 
 def repository(config):
-    name = config.get("github_repository", "vmlive/Hebei-IPTV-EPG-and-PLAYLIST")
+    name = config.get("github_repository", "vmlive/HBIPTV-EPG")
     if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+", name):
         raise ValueError("github_repository 必须是 GitHub 的 owner/repo")
     return name
