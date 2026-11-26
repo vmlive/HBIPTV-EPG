@@ -88,6 +88,7 @@ class SmokeTest(unittest.TestCase):
                 for name, (provider, _) in PROVIDERS.items()
             }
             providers["telecom"]["interface"] = "lo"
+            providers["telecom"]["fwmark"] = 101
             providers["cmcc"]["interface"] = None
             for entry in providers.values():
                 entry["auth"]["IPTV_AUTH_URL"] = f"http://127.0.0.1:{server.server_port}/login"
@@ -100,6 +101,7 @@ class SmokeTest(unittest.TestCase):
             ]
             result = subprocess.run(command, capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("telecom 开始抓取，接口 lo，fwmark 101", result.stderr)
             for name in providers:
                 output = data / name
                 guide = (output / "PL.xml").read_bytes()
@@ -139,16 +141,17 @@ class SmokeTest(unittest.TestCase):
             self.assertIn("保留上一版节目单", result.stderr)
             self.assertEqual((data / "cmcc/PL.xml.gz").read_bytes(), original)
 
-    def test_interface_binding_applies_to_http_and_https(self):
-        for interface in ("lo", None):
-            with self.subTest(interface=interface), create_session(interface, {}) as session:
+    def test_socket_options_apply_to_http_and_https(self):
+        for interface, fwmark in (("lo", 101), (None, 102), ("lo", None), (None, None)):
+            with (
+                self.subTest(interface=interface, fwmark=fwmark),
+                create_session(interface, {}, fwmark=fwmark) as session,
+            ):
                 for scheme in ("http://", "https://"):
                     options = session.get_adapter(scheme).poolmanager.connection_pool_kw["socket_options"]
-                    bindings = [
-                        value for level, opt, value in options
-                        if (level, opt) == (socket.SOL_SOCKET, socket.SO_BINDTODEVICE)
-                    ]
-                    self.assertEqual(bindings, [b"lo\0"] if interface else [])
+                    socket_options = {opt: value for level, opt, value in options if level == socket.SOL_SOCKET}
+                    self.assertEqual(socket_options.get(socket.SO_BINDTODEVICE), b"lo\0" if interface else None)
+                    self.assertEqual(socket_options.get(socket.SO_MARK), fwmark)
 
     def test_daily_schedule_uses_next_occurrence(self):
         timezone = ZoneInfo("Asia/Shanghai")

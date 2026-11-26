@@ -12,9 +12,23 @@
 | 移动 | `providers.cmcc.interface` | `eth1.3010` |
 | 联通 | `providers.unicom.interface` | `wg1` |
 
-`interface` 为 `null` 或省略时，HTTP 连接使用系统路由。设置接口名后，程序通过 Linux 的 `SO_BINDTODEVICE` 将鉴权、EPG、Logo 和重定向后的 HTTP 连接绑定到该网卡。使用下面的部署示例共享宿主机网络并授予 `NET_RAW`。HTTP 目标端口仍由运营商 URL 决定，无需配置容器端口映射。设置 `enabled: false` 可停用某一家。
+`interface` 为 `null` 或省略时，HTTP 连接由系统路由决定出站网卡。设置接口名后，程序通过 Linux 的 `SO_BINDTODEVICE` 将鉴权、EPG、Logo 和重定向后的 HTTP 连接绑定到该网卡。使用下面的部署示例共享宿主机网络并授予 `NET_RAW`。HTTP 目标端口仍由运营商 URL 决定，无需配置容器端口映射。设置 `enabled: false` 可停用某一家。
 
 VLAN 和 WireGuard 由宿主机管理。若使用原部署的联通隧道，目的网段需经 `wg1` 路由，并落在 `Unicom_XFC` peer 的 `AllowedIPs` 下。可用 `ip route get <目标IP> oif <接口>` 检查实际源地址和出站接口，用 `wg show wg1 allowed-ips` 核对 peer 网段。终端播放仍依赖可访问相应的流地址。
+
+### 用策略路由隔离运营商
+
+如果运营商的目标网段重叠，可以给每个运营商配置不同的 `fwmark`，由 VyOS 的 `policy local-route` 选用对应路由表。容器会在 HTTP 和 HTTPS 套接字上设置这个标记。省略 `fwmark` 或填 `null` 时沿用系统原有规则。启用标记需要 Linux 5.17 或更新版本提供的 `NET_RAW` 权限。
+
+例如，在已有的 `providers.telecom` 对象中保留 `"interface": "eth0.99"`，并加入整数 `"fwmark": 101`。VyOS 配置示例如下，默认下一跳取自电信 DHCP 租约。
+
+```text
+set protocols static table 101 route 0.0.0.0/0 dhcp-interface 'eth0.99'
+set policy local-route rule 101 fwmark '101'
+set policy local-route rule 101 set table '101'
+```
+
+提交后，在 VyOS 操作模式下用 `ip -4 route show table 101` 查看下一跳，并用 `sudo ip -4 route get 192.168.0.23 mark 101 oif eth0.99` 确认选路。若 DHCP 租约没有提供网关，需要在对应表中配置运营商网络实际可用的下一跳。
 
 ## 本地产物
 

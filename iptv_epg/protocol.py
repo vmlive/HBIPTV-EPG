@@ -17,12 +17,14 @@ REAUTH_FREQUENCY = 60
 
 
 class InterfaceAdapter(HTTPAdapter):
-    def __init__(self, interface):
+    def __init__(self, interface, fwmark):
         self.socket_options = list(HTTPConnection.default_socket_options)
         if interface is not None:
             self.socket_options.append(
                 (socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface.encode() + b'\0')
             )
+        if fwmark is not None:
+            self.socket_options.append((socket.SOL_SOCKET, socket.SO_MARK, fwmark))
         super().__init__(max_retries=Retry(
             total=5,
             backoff_factor=1,
@@ -34,7 +36,7 @@ class InterfaceAdapter(HTTPAdapter):
         super().init_poolmanager(*args, socket_options=self.socket_options, **kwargs)
 
 
-def create_session(interface, auth_config):
+def create_session(interface, auth_config, *, fwmark=None):
     if interface is not None:
         socket.if_nametoindex(interface)
     session = requests.Session()
@@ -44,7 +46,7 @@ def create_session(interface, auth_config):
     session.stbid_short = None
     session.host = None
     for scheme in ('http://', 'https://'):
-        session.mount(scheme, InterfaceAdapter(interface))
+        session.mount(scheme, InterfaceAdapter(interface, fwmark))
     return session
 
 

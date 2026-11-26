@@ -64,7 +64,11 @@ def provider_config(config, name):
     ):
         raise ValueError("无效的 Linux 接口名称")
 
-    return interface, auth
+    fwmark = entry.get("fwmark")
+    if fwmark is not None and (type(fwmark) is not int or not 1 <= fwmark <= 2147483647):
+        raise ValueError("fwmark 必须是 1 到 2147483647 的整数")
+
+    return interface, fwmark, auth
 
 
 @contextmanager
@@ -140,13 +144,13 @@ def save_local(stage, output):
 
 def collect(name, config, data_dir):
     module, label = PROVIDERS[name]
-    interface, auth = provider_config(config, name)
+    interface, fwmark, auth = provider_config(config, name)
     with provider_lock(data_dir, name):
         with tempfile.TemporaryDirectory(prefix=f".{name}-", dir=data_dir) as temp:
             stage = Path(temp)
-            logger.info("%s 开始抓取，出站方式 %s", name, interface or "系统路由")
+            logger.info("%s 开始抓取，接口 %s，fwmark %s", name, interface or "自动", fwmark or "未设置")
             try:
-                session = create_session(interface, auth)
+                session = create_session(interface, auth, fwmark=fwmark)
             except OSError:
                 raise RuntimeError(f"无法使用接口 {interface}，请检查宿主机网络") from None
             with session:

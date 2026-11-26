@@ -4,6 +4,7 @@
     "telecom": {
       "enabled": true,
       "interface": null,
+      "fwmark": null,
       "auth": {
         "UserID": "",
         "mac": "",
@@ -30,6 +31,7 @@
     "cmcc": {
       "enabled": true,
       "interface": null,
+      "fwmark": null,
       "auth": {
         "UserID": "",
         "mac": "",
@@ -45,6 +47,7 @@
     "unicom": {
       "enabled": true,
       "interface": null,
+      "fwmark": null,
       "auth": {
         "UserID": "",
         "mac": "",
