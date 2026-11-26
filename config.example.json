@@ -1,0 +1,64 @@
+{
+  "github_repository": "vmlive/Hebei-IPTV-EPG-and-PLAYLIST",
+  "providers": {
+    "telecom": {
+      "enabled": true,
+      "interface": "eth0.99",
+      "auth": {
+        "UserID": "",
+        "mac": "",
+        "STBID": "",
+        "ip": "",
+        "STBType": "",
+        "STBVersion": "",
+        "templateName": "",
+        "areaId": "",
+        "userGroupId": "",
+        "productPackageId": "",
+        "UserField": "",
+        "SoftwareVersion": "",
+        "IsSmartStb": "",
+        "XMPPCapability": "",
+        "ChipID": "",
+        "conntype": "",
+        "tempKey": "",
+        "UserAgent": "",
+        "password": "",
+        "IPTV_AUTH_URL": ""
+      }
+    },
+    "cmcc": {
+      "enabled": true,
+      "interface": "eth1.3010",
+      "auth": {
+        "UserID": "",
+        "mac": "",
+        "STBID": "",
+        "ip": "",
+        "STBType": "",
+        "STBVersion": "",
+        "UserAgent": "",
+        "password": "",
+        "IPTV_AUTH_URL": ""
+      }
+    },
+    "unicom": {
+      "enabled": true,
+      "interface": "wg1",
+      "auth": {
+        "UserID": "",
+        "mac": "",
+        "STBID": "",
+        "ip": "",
+        "STBType": "",
+        "STBVersion": "",
+        "CONNTYPE": "",
+        "AREA_ID": "",
+        "FULL_AREA_ID": "",
+        "UserAgent": "",
+        "password": "",
+        "IPTV_AUTH_URL": ""
+      }
+    }
+  }
+}

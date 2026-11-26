@@ -1,0 +1,29 @@
+services:
+  epg:
+    image: "${EPG_IMAGE:-hebei-iptv-epg}"
+    build: .
+    network_mode: host
+    init: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      EPG_RUN_AT: "${EPG_RUN_AT:-04:00}"
+    volumes:
+      - type: bind
+        source: ./config.local.json
+        target: /run/iptv/config.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./secrets
+        target: /run/iptv-secrets
+        read_only: true
+        bind:
+          create_host_path: false
+      - ./data:/data
+    restart: unless-stopped
