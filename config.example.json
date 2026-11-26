@@ -1,9 +1,9 @@
 {
-  "github_repository": "vmlive/HBIPTV-EPG",
+  "playlist_base_url": null,
   "providers": {
     "telecom": {
       "enabled": true,
-      "interface": "eth0.99",
+      "interface": null,
       "auth": {
         "UserID": "",
         "mac": "",
@@ -29,7 +29,7 @@
     },
     "cmcc": {
       "enabled": true,
-      "interface": "eth1.3010",
+      "interface": null,
       "auth": {
         "UserID": "",
         "mac": "",
@@ -44,7 +44,7 @@
     },
     "unicom": {
       "enabled": true,
-      "interface": "wg1",
+      "interface": null,
       "auth": {
         "UserID": "",
         "mac": "",

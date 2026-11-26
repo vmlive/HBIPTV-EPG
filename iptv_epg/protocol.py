@@ -18,10 +18,11 @@ REAUTH_FREQUENCY = 60
 
 class InterfaceAdapter(HTTPAdapter):
     def __init__(self, interface):
-        self.socket_options = [
-            *HTTPConnection.default_socket_options,
-            (socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface.encode() + b'\0'),
-        ]
+        self.socket_options = list(HTTPConnection.default_socket_options)
+        if interface is not None:
+            self.socket_options.append(
+                (socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface.encode() + b'\0')
+            )
         super().__init__(max_retries=Retry(
             total=5,
             backoff_factor=1,
@@ -34,7 +35,8 @@ class InterfaceAdapter(HTTPAdapter):
 
 
 def create_session(interface, auth_config):
-    socket.if_nametoindex(interface)
+    if interface is not None:
+        socket.if_nametoindex(interface)
     session = requests.Session()
     session.trust_env = False
     session.auth_config = auth_config

@@ -4,6 +4,7 @@ import gzip
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import socket
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -14,7 +15,7 @@ from xml.etree import ElementTree as ET
 from zoneinfo import ZoneInfo
 
 from iptv_epg.__main__ import PROVIDERS, next_run, parse_run_at
-from iptv_epg.publish import check_playlist, update
+from iptv_epg.protocol import create_session
 
 
 class IPTVFixture(BaseHTTPRequestHandler):
@@ -82,11 +83,12 @@ class SmokeTest(unittest.TestCase):
             root = Path(temp)
             providers = {
                 name: {
-                    "interface": "lo",
                     "auth": dict.fromkeys(provider.AUTH_FIELDS, "dummy"),
                 }
-                for name, (provider, _, _) in PROVIDERS.items()
+                for name, (provider, _) in PROVIDERS.items()
             }
+            providers["telecom"]["interface"] = "lo"
+            providers["cmcc"]["interface"] = None
             for entry in providers.values():
                 entry["auth"]["IPTV_AUTH_URL"] = f"http://127.0.0.1:{server.server_port}/login"
             config = root / "config.json"
@@ -94,7 +96,7 @@ class SmokeTest(unittest.TestCase):
             data = root / "data"
             command = [
                 sys.executable, "-m", "iptv_epg", "--config", str(config),
-                "--data", str(data), "once", "--no-upload",
+                "--data", str(data), "once",
             ]
             result = subprocess.run(command, capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -108,18 +110,25 @@ class SmokeTest(unittest.TestCase):
                 self.assertEqual(xml.findtext("programme/title"), "早间 & 新闻")
                 self.assertTrue(xml.find("programme").get("start").endswith(" +0800"))
                 playlist = (output / "rtp2http.m3u").read_text()
-                self.assertIn(f"https://raw.githubusercontent.com/vmlive/HBIPTV-EPG/epg-data/{name}/PL.xml.gz", playlist)
+                self.assertIn('x-tvg-url="PL.xml.gz"', playlist)
+                self.assertIn('tvg-logo="logo/101.png"', playlist)
                 self.assertIn("rtp://239.1.2.3:1234", playlist)
                 self.assertTrue((output / "logo/101.png").is_file())
 
             # Force the first provider to fail and confirm the others still run.
             providers["telecom"]["interface"] = "missing0"
-            config.write_text(json.dumps({"providers": providers}), encoding="utf-8")
+            config.write_text(
+                json.dumps({"providers": providers, "playlist_base_url": "https://example.test/epg/"}),
+                encoding="utf-8",
+            )
             result = subprocess.run(command, capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertIn("cmcc 已生成", result.stderr)
             self.assertIn("unicom 已生成", result.stderr)
             self.assertIn("无法使用接口 missing0", result.stderr)
+            playlist = (data / "cmcc/rtp2http.m3u").read_text()
+            self.assertIn('x-tvg-url="https://example.test/epg/cmcc/PL.xml.gz"', playlist)
+            self.assertIn('tvg-logo="https://example.test/epg/cmcc/logo/101.png"', playlist)
 
             original = (data / "cmcc/PL.xml.gz").read_bytes()
             server.empty_guide = True
@@ -130,36 +139,16 @@ class SmokeTest(unittest.TestCase):
             self.assertIn("保留上一版节目单", result.stderr)
             self.assertEqual((data / "cmcc/PL.xml.gz").read_bytes(), original)
 
-    def test_git_release_preserves_other_carriers_and_skips_no_change(self):
-        with TemporaryDirectory() as temp:
-            root = Path(temp)
-            remote = root / "remote.git"
-            stage = root / "stage"
-            stage.mkdir()
-            for name in ("PL.xml", "PL.xml.gz", "rtp2http.m3u"):
-                (stage / name).write_text(name)
-            (stage / "logo").mkdir()
-            (stage / "logo/1.png").write_bytes(b"image")
-            subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
-
-            for index, provider in enumerate(("telecom", "cmcc", "cmcc")):
-                work = root / str(index)
-                work.mkdir()
-                update(work, stage, provider, str(remote), None)
-            files = subprocess.check_output(
-                ["git", "-C", str(remote), "ls-tree", "-r", "--name-only", "epg-data"], text=True
-            ).splitlines()
-            self.assertEqual(len(files), 8)
-            self.assertIn("telecom/logo/1.png", files)
-            self.assertIn("cmcc/PL.xml.gz", files)
-            count = subprocess.check_output(["git", "-C", str(remote), "rev-list", "--count", "epg-data"], text=True)
-            self.assertEqual(count.strip(), "2")
-
-        with self.assertRaisesRegex(RuntimeError, "鉴权信息"):
-            check_playlist(
-                [{"timeshift_url_full": "rtsp://example.test/1?access_token=dummy", "igmp_url": "239.1.1.1"}],
-                {},
-            )
+    def test_interface_binding_applies_to_http_and_https(self):
+        for interface in ("lo", None):
+            with self.subTest(interface=interface), create_session(interface, {}) as session:
+                for scheme in ("http://", "https://"):
+                    options = session.get_adapter(scheme).poolmanager.connection_pool_kw["socket_options"]
+                    bindings = [
+                        value for level, opt, value in options
+                        if (level, opt) == (socket.SOL_SOCKET, socket.SO_BINDTODEVICE)
+                    ]
+                    self.assertEqual(bindings, [b"lo\0"] if interface else [])
 
     def test_daily_schedule_uses_next_occurrence(self):
         timezone = ZoneInfo("Asia/Shanghai")

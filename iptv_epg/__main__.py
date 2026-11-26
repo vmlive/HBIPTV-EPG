@@ -9,7 +9,6 @@ import os
 from pathlib import Path
 import re
 import shutil
-import subprocess
 import tempfile
 import time
 from urllib.parse import urlsplit
@@ -17,14 +16,13 @@ from xml.etree import ElementTree as ET
 from zoneinfo import ZoneInfo
 
 from . import cmcc, telecom, unicom
-from .publish import BRANCH, check_playlist, publish, repository
 from .protocol import create_session, download_logos, get_all_epg
 
 
 PROVIDERS = {
-    "telecom": (telecom, "电信", "eth0.99"),
-    "cmcc": (cmcc, "移动", "eth1.3010"),
-    "unicom": (unicom, "联通", "wg1"),
+    "telecom": (telecom, "电信"),
+    "cmcc": (cmcc, "移动"),
+    "unicom": (unicom, "联通"),
 }
 TZ = "Asia/Shanghai"
 logger = logging.getLogger("iptv_epg")
@@ -38,12 +36,19 @@ def load_config(path):
     unknown = config["providers"].keys() - PROVIDERS.keys()
     if unknown:
         raise ValueError("providers 包含未知运营商")
-    config["github_repository"] = repository(config)
+    base_url = config.get("playlist_base_url")
+    if base_url is not None:
+        if not isinstance(base_url, str) or re.search(r'[\s"]', base_url):
+            raise RuntimeError("playlist_base_url 必须是 HTTP(S) 目录地址")
+        url = urlsplit(base_url)
+        if url.scheme not in ("http", "https") or not url.hostname or url.username is not None or url.query or url.fragment:
+            raise RuntimeError("playlist_base_url 必须是 HTTP(S) 目录地址")
+        config["playlist_base_url"] = base_url.rstrip("/")
     return config
 
 
 def provider_config(config, name):
-    module, _, default_interface = PROVIDERS[name]
+    module, _ = PROVIDERS[name]
     entry = config["providers"][name]
     auth = entry.get("auth", {})
     invalid = [key for key in module.AUTH_FIELDS if not isinstance(auth.get(key), str)]
@@ -53,8 +58,10 @@ def provider_config(config, name):
     url = urlsplit(auth["IPTV_AUTH_URL"])
     if url.scheme not in ("http", "https") or not url.hostname or url.username:
         raise ValueError("IPTV_AUTH_URL 必须是运营商的 HTTP(S) 鉴权入口")
-    interface = entry.get("interface", default_interface)
-    if not isinstance(interface, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", interface):
+    interface = entry.get("interface")
+    if interface is not None and (
+        not isinstance(interface, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", interface)
+    ):
         raise ValueError("无效的 Linux 接口名称")
 
     return interface, auth
@@ -70,9 +77,9 @@ def provider_lock(data_dir, name):
         yield
 
 
-def write_playlist(path, channels, label, public_url):
+def write_playlist(path, channels, label, path_prefix):
     with path.open("w", encoding="utf-8") as stream:
-        stream.write(f'#EXTM3U name="{label}IPTV" x-tvg-url="{public_url}/PL.xml.gz"\n')
+        stream.write(f'#EXTM3U name="{label}IPTV" x-tvg-url="{path_prefix}PL.xml.gz"\n')
         for channel in channels:
             id_ = channel["userchannel_id"]
             name = channel["channel_name"]
@@ -87,7 +94,7 @@ def write_playlist(path, channels, label, public_url):
                     live += f'&fec={channel["fec_port"]}'
             stream.write(
                 f'#EXTINF:-1 tvg-id="{id_}" tvg-name="{name}" '
-                f'tvg-logo="{public_url}/logo/{id_}.png" group-title="{group}" '
+                f'tvg-logo="{path_prefix}logo/{id_}.png" group-title="{group}" '
                 f'catchup="default" catchup-source="{catchup}", {name}\n{live}\n'
             )
 
@@ -120,7 +127,7 @@ def save_local(stage, output):
     (output / "logo").mkdir(parents=True, exist_ok=True)
     for path in stage.rglob("*"):
         if path.is_file():
-            # Keep the staged tree intact for rsync, and replace each local file atomically.
+            # Use a temporary file on the destination filesystem for an atomic replacement.
             destination = output / path.relative_to(stage)
             with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as temp:
                 temp_path = Path(temp.name)
@@ -131,13 +138,13 @@ def save_local(stage, output):
                 temp_path.unlink(missing_ok=True)
 
 
-def collect(name, config, data_dir, *, upload_enabled):
-    module, label, _ = PROVIDERS[name]
+def collect(name, config, data_dir):
+    module, label = PROVIDERS[name]
     interface, auth = provider_config(config, name)
     with provider_lock(data_dir, name):
         with tempfile.TemporaryDirectory(prefix=f".{name}-", dir=data_dir) as temp:
             stage = Path(temp)
-            logger.info("%s 开始抓取，接口 %s", name, interface)
+            logger.info("%s 开始抓取，出站方式 %s", name, interface or "系统路由")
             try:
                 session = create_session(interface, auth)
             except OSError:
@@ -151,19 +158,15 @@ def collect(name, config, data_dir, *, upload_enabled):
                 data = get_all_epg(session, channels, module.authenticate, reauth_on_503=name != "unicom")
                 count = write_guide(stage, data, label)
                 download_logos(session, channels, stage / "logo", module.authenticate)
-            repo = config["github_repository"]
-            public_url = f"https://raw.githubusercontent.com/{repo}/{BRANCH}/{name}"
-            write_playlist(stage / "rtp2http.m3u", channels, label, public_url)
+            base_url = config.get("playlist_base_url")
+            prefix = f"{base_url}/{name}/" if base_url else ""
+            write_playlist(stage / "rtp2http.m3u", channels, label, prefix)
             save_local(stage, data_dir / name)
             logos = sum(1 for _ in (stage / "logo").glob("*.png"))
             logger.info("%s 已生成 %s 个频道、%s 条节目和 %s 张 Logo", name, len(channels), count, logos)
-            if upload_enabled:
-                check_playlist(channels, auth)
-                publish(stage, name, repo)
-                logger.info("%s GitHub 发布完成", name)
 
 
-def run_batch(config_path, data_dir, provider, *, upload_enabled):
+def run_batch(config_path, data_dir, provider):
     try:
         config = load_config(config_path)
         selected = [
@@ -187,12 +190,12 @@ def run_batch(config_path, data_dir, provider, *, upload_enabled):
     failures = 0
     for name in selected:
         try:
-            collect(name, config, data_dir, upload_enabled=upload_enabled)
+            collect(name, config, data_dir)
         except (ValueError, RuntimeError) as exc:
             logger.error("%s 抓取失败。%s", name, exc)
             failures += 1
-        except (OSError, subprocess.SubprocessError, ET.ParseError, TypeError, AttributeError) as exc:
-            logger.error("%s 抓取或发布失败（%s）", name, type(exc).__name__)
+        except (OSError, ET.ParseError, TypeError, AttributeError) as exc:
+            logger.error("%s 抓取或写入失败（%s）", name, type(exc).__name__)
             failures += 1
     return int(bool(failures))
 
@@ -209,13 +212,14 @@ def parse_run_at(value):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="抓取和发布 IPTV EPG")
+    parser = argparse.ArgumentParser(description="抓取 IPTV EPG 并保存到本地")
     parser.add_argument("--config", type=Path, default=Path("/run/iptv/config.json"))
     parser.add_argument("--data", type=Path, default=Path("/data"))
     mode = parser.add_subparsers(dest="mode", required=True)
     for command in ("once", "schedule"):
         subparser = mode.add_parser(command)
-        subparser.add_argument("--no-upload", action="store_true", help="仅抓取并写入本地数据目录")
+        # Older deployments may still pass this option.
+        subparser.add_argument("--no-upload", action="store_true", help=argparse.SUPPRESS)
         if command == "once":
             subparser.add_argument("--provider", choices=PROVIDERS)
         else:
@@ -225,7 +229,7 @@ def main():
     os.environ["TZ"] = TZ
     time.tzset()
     if args.mode == "once":
-        return run_batch(args.config, args.data, args.provider, upload_enabled=not args.no_upload)
+        return run_batch(args.config, args.data, args.provider)
 
     local_tz = ZoneInfo(TZ)
     while True:
@@ -233,7 +237,7 @@ def main():
         logger.info("下次抓取时间 %s", target.isoformat())
         while (remaining := target.timestamp() - time.time()) > 0:
             time.sleep(min(remaining, 60))
-        run_batch(args.config, args.data, None, upload_enabled=not args.no_upload)
+        run_batch(args.config, args.data, None)
 
 
 if __name__ == "__main__":

@@ -19,11 +19,5 @@ services:
         read_only: true
         bind:
           create_host_path: false
-      - type: bind
-        source: ./secrets
-        target: /run/iptv-secrets
-        read_only: true
-        bind:
-          create_host_path: false
       - ./data:/data
     restart: unless-stopped

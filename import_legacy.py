@@ -50,7 +50,7 @@ def main():
         parser.error("输出文件已存在，请选择新路径")
     except OSError as exc:
         parser.error(f"无法读取或写入文件（{type(exc).__name__}）")
-    print("已导入鉴权设置。请核对 github_repository 后再启用发布。")
+    print("已导入鉴权设置。需要绑定网卡时，请填写各运营商的 interface。")
 
 
 def private_open(path, flags):

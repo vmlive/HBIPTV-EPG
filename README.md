@@ -1,48 +1,36 @@
 # 河北 IPTV EPG 定时抓取
 
-容器每天抓取河北电信、移动和联通的节目单、播放列表和频道 Logo，并发布到 GitHub 的 `epg-data` 分支。源码存放在 `main` 分支。Python、`pycryptodome` 和 Git 都由镜像提供。VyOS 1.5.1 可用原生 `container` 命令部署，也可在具备 Docker Compose 的 Linux 主机上运行。
+容器每天抓取河北电信、移动和联通的节目单、播放列表和频道 Logo。产物保存在挂载的本地数据目录，可由 VyOS 脚本读取和分发。Python 和 `pycryptodome` 由镜像提供。VyOS 1.5.1 可用原生 `container` 命令部署，也可在 Linux 上用 Docker Compose 运行。
 
-## 宿主机网络
+## 配置运营商和出站网卡
 
-| 运营商 | 配置键 | Linux 接口 |
+用 `python3 import_legacy.py /path/to/old-scripts` 从旧脚本导入鉴权信息，或复制 `config.example.json` 为 `config.local.json` 后填入各运营商的 `auth`。为每家运营商分别设置 `providers.<运营商>.interface`。下面是原部署的网卡示例，新部署请填写自己的接口名。
+
+| 运营商 | 配置路径 | 原部署的接口示例 |
 | --- | --- | --- |
-| 电信 | `telecom` | `eth0.99` |
-| 移动 | `cmcc` | `eth1.3010` |
-| 联通 | `unicom` | `wg1` |
+| 电信 | `providers.telecom.interface` | `eth0.99` |
+| 移动 | `providers.cmcc.interface` | `eth1.3010` |
+| 联通 | `providers.unicom.interface` | `wg1` |
 
-VyOS 原生容器使用 `allow-host-networks`，Compose 使用 `network_mode: host`，容器因此能使用宿主机上的接口。程序给每家运营商创建独立的 HTTP 会话，通过 Linux 的 `SO_BINDTODEVICE` 把鉴权、EPG、Logo 请求及重定向后的 HTTP 连接绑定到相应出站接口。目标 IP 和 TCP 端口由运营商 URL 决定。容器使用 `NET_RAW` 完成套接字绑定，无需配置端口映射。
+`interface` 为 `null` 或省略时，HTTP 连接使用系统路由。设置接口名后，程序通过 Linux 的 `SO_BINDTODEVICE` 将鉴权、EPG、Logo 和重定向后的 HTTP 连接绑定到该网卡。使用下面的部署示例共享宿主机网络并授予 `NET_RAW`。HTTP 目标端口仍由运营商 URL 决定，无需配置容器端口映射。设置 `enabled: false` 可停用某一家。
 
-VLAN、IP 和路由由 VyOS 管理。联通目的网段须经 `wg1` 路由，并落在 `Unicom_XFC` peer 的 `AllowedIPs` 下。可用 `ip route get <目标IP> oif <接口>` 核对实际源地址和出站接口，用 `wg show wg1 allowed-ips` 核对 peer 的目标网段。DNS 与 GitHub 上传走宿主机常规解析和路由。容器抓取成功也不改变终端播放所需的运营商网络条件。
+VLAN 和 WireGuard 由宿主机管理。若使用原部署的联通隧道，目的网段需经 `wg1` 路由，并落在 `Unicom_XFC` peer 的 `AllowedIPs` 下。可用 `ip route get <目标IP> oif <接口>` 检查实际源地址和出站接口，用 `wg show wg1 allowed-ips` 核对 peer 网段。终端播放仍依赖可访问相应的流地址。
 
-## 配置 GitHub 发布
+## 本地产物
 
-在部署机器上准备鉴权配置和令牌文件。
+每家运营商写入单独的目录。以电信为例，容器内的文件是 `/data/telecom/PL.xml`、`PL.xml.gz`、`rtp2http.m3u` 和 `logo/*.png`。下面的部署示例会把这些文件分别保存到 VyOS 的 `/config/hbiptv-epg/data/` 或 Compose 项目的 `./data/`。
 
-```bash
-python3 import_legacy.py /path/to/old-scripts
-mkdir -m 700 -p secrets
-```
+M3U 默认使用相对于同一目录的节目单和 Logo 路径。如果你的脚本会把整个数据目录发布到 HTTP(S) 服务，可将 `playlist_base_url` 设为该目录的网址，例如 `https://example.org/iptv`。生成的电信节目单链接将是 `https://example.org/iptv/telecom/PL.xml.gz`。该选项只改变 M3U 中的链接。
 
-也可将 `config.example.json` 复制为 `config.local.json` 并填入各运营商的 `auth` 字段。默认目标是 `vmlive/HBIPTV-EPG`，可用 `github_repository` 指向另一个数据仓库。如果已有部署，检查 `config.local.json` 中的 `github_repository`，将旧仓库名改为 `vmlive/HBIPTV-EPG`。更新镜像后，下一次抓取生成的 M3U 会引用新仓库的 Raw 地址。播放器中已保存的旧订阅地址也需更新。关闭某一家可设置 `enabled: false`。
-
-创建范围限于数据仓库、具有 **Contents: Read and write** 权限的 GitHub 细粒度访问令牌，将它保存在 `secrets/github-token`，权限设为 `0600`。Git 通过只读挂载读取令牌。配置和令牌应单独安全迁移。数据分支会在首次成功发布时创建。
-
-发布文件位于 `epg-data` 分支的 `telecom/`、`cmcc/` 和 `unicom/`。每个目录包含 `PL.xml`、`PL.xml.gz`、`rtp2http.m3u` 和可用的 `logo/*.png`。普通播放器直接订阅 Raw URL 时，数据仓库需允许匿名读取。发布到公开仓库前，请确认有权共享运营商内容。程序遇到常见带鉴权参数的播放地址时会跳过该运营商的发布，并保留本地结果供检查。
-
-例如，电信 EPG 的地址为：
-
-```text
-https://raw.githubusercontent.com/vmlive/HBIPTV-EPG/epg-data/telecom/PL.xml.gz
-```
+从旧版升级时，已有的 `interface` 设置会继续生效。可移除配置里的 `github_repository` 及容器的令牌挂载。VyOS 原生部署可在配置模式下执行 `delete container name hbiptv-epg volume secrets`，然后提交并保存。
 
 ## 用 VyOS 1.5.1 原生命令运行
 
-将已准备的 `config.local.json` 和 `secrets/github-token` 复制到 VyOS，然后在操作模式下安装到持久化的 `/config`。如果文件放在其他目录，请替换下面命令中的源路径。
+将已准备的 `config.local.json` 复制到 VyOS，然后在操作模式下安装到持久化的 `/config`。如果文件放在其他目录，请替换下面命令中的源路径。
 
 ```bash
-sudo install -d -m 0700 /config/hbiptv-epg /config/hbiptv-epg/secrets /config/hbiptv-epg/data
+sudo install -d -m 0700 /config/hbiptv-epg /config/hbiptv-epg/data
 sudo install -m 0600 config.local.json /config/hbiptv-epg/config.json
-sudo install -m 0600 secrets/github-token /config/hbiptv-epg/secrets/github-token
 ```
 
 把下面的 `YOUR_DOCKERHUB_USER` 替换为实际发布镜像的 Docker Hub 用户名。先拉取镜像，再进入配置模式。镜像默认启动定时任务。
@@ -58,9 +46,6 @@ set container name hbiptv-epg environment EPG_RUN_AT value '04:00'
 set container name hbiptv-epg volume config source '/config/hbiptv-epg/config.json'
 set container name hbiptv-epg volume config destination '/run/iptv/config.json'
 set container name hbiptv-epg volume config mode 'ro'
-set container name hbiptv-epg volume secrets source '/config/hbiptv-epg/secrets'
-set container name hbiptv-epg volume secrets destination '/run/iptv-secrets'
-set container name hbiptv-epg volume secrets mode 'ro'
 set container name hbiptv-epg volume data source '/config/hbiptv-epg/data'
 set container name hbiptv-epg volume data destination '/data'
 set container name hbiptv-epg volume data mode 'rw'
@@ -71,7 +56,7 @@ show container
 show container log hbiptv-epg
 ```
 
-在操作模式下运行 `connect container hbiptv-epg` 进入容器。先执行 `python -m iptv_epg once --no-upload`，检查宿主机 `/config/hbiptv-epg/data/` 中的产物。确认后执行 `python -m iptv_epg once` 测试发布，用 `exit` 返回 VyOS。定时任务默认每天北京时间 04:00 执行。
+在操作模式下运行 `connect container hbiptv-epg` 进入容器。执行 `python -m iptv_epg once` 立即抓取，用 `exit` 返回 VyOS 后检查宿主机 `/config/hbiptv-epg/data/` 中的产物。定时任务默认每天北京时间 04:00 执行。
 
 ## 用 Docker Compose 运行
 
@@ -84,13 +69,12 @@ docker compose build
 如果镜像已发布到 Docker Hub，在 `.env` 设置 `EPG_IMAGE=<Docker Hub 用户名>/hebei-iptv-epg:latest`，并运行 `docker compose pull epg`。
 
 ```bash
-docker compose run --rm epg once --no-upload
 docker compose run --rm epg once
 docker compose up -d epg
 docker compose logs -f epg
 ```
 
-第一次执行后可在 `data/` 核对产物。也可加 `--provider telecom`、`--provider cmcc` 或 `--provider unicom` 单独调试。第二次执行时检查 GitHub 的 `epg-data` 分支。定时服务默认每天北京时间 04:00 运行，可在 `.env` 设置 `EPG_RUN_AT=03:30` 后重新执行 `docker compose up -d epg`。个别运营商失败时，其他运营商仍会运行。空节目单不会覆盖上一版。
+第一次执行后可在 `data/` 核对产物。也可加 `--provider telecom`、`--provider cmcc` 或 `--provider unicom` 单独调试。定时服务默认每天北京时间 04:00 运行，可在 `.env` 设置 `EPG_RUN_AT=03:30` 后重新执行 `docker compose up -d epg`。个别运营商失败时，其他运营商仍会运行。空节目单不会覆盖上一版。
 
 如果构建主机使用带自定义 CA 的出口代理，可使用宿主机已信任的 CA 构建：
 
