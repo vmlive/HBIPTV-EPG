@@ -1,6 +1,6 @@
 # 河北 IPTV EPG 定时抓取
 
-Docker 容器每天抓取河北电信、移动和联通的节目单、播放列表和频道 Logo，并发布到 GitHub 的 `epg-data` 分支。源码存放在 `main` 分支。Python、`pycryptodome` 和 Git 都由镜像提供，VyOS 只需提供 Docker Engine、Compose v2 及已有网络配置。
+容器每天抓取河北电信、移动和联通的节目单、播放列表和频道 Logo，并发布到 GitHub 的 `epg-data` 分支。源码存放在 `main` 分支。Python、`pycryptodome` 和 Git 都由镜像提供。VyOS 1.5.1 可用原生 `container` 命令部署，也可在具备 Docker Compose 的 Linux 主机上运行。
 
 ## 宿主机网络
 
@@ -10,7 +10,7 @@ Docker 容器每天抓取河北电信、移动和联通的节目单、播放列�
 | 移动 | `cmcc` | `eth1.3010` |
 | 联通 | `unicom` | `wg1` |
 
-Compose 使用 `network_mode: host`，容器因此能使用 VyOS 上的接口。程序给每家运营商创建独立的 HTTP 会话，通过 Linux 的 `SO_BINDTODEVICE` 把鉴权、EPG、Logo 请求及重定向后的 HTTP 连接绑定到相应出站接口。目标 IP 和 TCP 端口由运营商 URL 决定。Compose 不需要做端口映射。容器使用 `NET_RAW` 完成套接字绑定。
+VyOS 原生容器使用 `allow-host-networks`，Compose 使用 `network_mode: host`，容器因此能使用宿主机上的接口。程序给每家运营商创建独立的 HTTP 会话，通过 Linux 的 `SO_BINDTODEVICE` 把鉴权、EPG、Logo 请求及重定向后的 HTTP 连接绑定到相应出站接口。目标 IP 和 TCP 端口由运营商 URL 决定。容器使用 `NET_RAW` 完成套接字绑定，无需配置端口映射。
 
 VLAN、IP 和路由由 VyOS 管理。联通目的网段须经 `wg1` 路由，并落在 `Unicom_XFC` peer 的 `AllowedIPs` 下。可用 `ip route get <目标IP> oif <接口>` 核对实际源地址和出站接口，用 `wg show wg1 allowed-ips` 核对 peer 的目标网段。DNS 与 GitHub 上传走宿主机常规解析和路由。容器抓取成功也不改变终端播放所需的运营商网络条件。
 
@@ -35,7 +35,45 @@ mkdir -m 700 -p secrets
 https://raw.githubusercontent.com/vmlive/HBIPTV-EPG/epg-data/telecom/PL.xml.gz
 ```
 
-## 在 VyOS 运行
+## 用 VyOS 1.5.1 原生命令运行
+
+将已准备的 `config.local.json` 和 `secrets/github-token` 复制到 VyOS，然后在操作模式下安装到持久化的 `/config`。如果文件放在其他目录，请替换下面命令中的源路径。
+
+```bash
+sudo install -d -m 0700 /config/hbiptv-epg /config/hbiptv-epg/secrets /config/hbiptv-epg/data
+sudo install -m 0600 config.local.json /config/hbiptv-epg/config.json
+sudo install -m 0600 secrets/github-token /config/hbiptv-epg/secrets/github-token
+```
+
+把下面的 `YOUR_DOCKERHUB_USER` 替换为实际发布镜像的 Docker Hub 用户名。先拉取镜像，再进入配置模式。镜像默认启动定时任务。
+
+```text
+add container image docker.io/YOUR_DOCKERHUB_USER/hebei-iptv-epg:latest
+configure
+set container name hbiptv-epg image 'docker.io/YOUR_DOCKERHUB_USER/hebei-iptv-epg:latest'
+set container name hbiptv-epg allow-host-networks
+set container name hbiptv-epg capability 'net-raw'
+set container name hbiptv-epg restart 'always'
+set container name hbiptv-epg environment EPG_RUN_AT value '04:00'
+set container name hbiptv-epg volume config source '/config/hbiptv-epg/config.json'
+set container name hbiptv-epg volume config destination '/run/iptv/config.json'
+set container name hbiptv-epg volume config mode 'ro'
+set container name hbiptv-epg volume secrets source '/config/hbiptv-epg/secrets'
+set container name hbiptv-epg volume secrets destination '/run/iptv-secrets'
+set container name hbiptv-epg volume secrets mode 'ro'
+set container name hbiptv-epg volume data source '/config/hbiptv-epg/data'
+set container name hbiptv-epg volume data destination '/data'
+set container name hbiptv-epg volume data mode 'rw'
+commit
+save
+exit
+show container
+show container log hbiptv-epg
+```
+
+在操作模式下运行 `connect container hbiptv-epg` 进入容器。先执行 `python -m iptv_epg once --no-upload`，检查宿主机 `/config/hbiptv-epg/data/` 中的产物。确认后执行 `python -m iptv_epg once` 测试发布，用 `exit` 返回 VyOS。定时任务默认每天北京时间 04:00 执行。
+
+## 用 Docker Compose 运行
 
 从源码构建时运行：
 
