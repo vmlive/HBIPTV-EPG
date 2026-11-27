@@ -35,9 +35,28 @@ class DhcpRouteTest(unittest.TestCase):
                 "new_subnet_mask='255.255.255.0'\nnew_routers='192.0.2.1 198.51.100.1'\n"
                 "new_expiry='200'\n"
             )
-            self.assertEqual(route.read_lease(lease_file, INTERFACE, {("198.51.100.2", 24)}, 100), NEW)
-            self.assertIsNone(route.read_lease(lease_file, INTERFACE, {("192.0.2.2", 24)}, 100))
-            self.assertIsNone(route.read_lease(lease_file, INTERFACE, {("198.51.100.2", 24)}, 200))
+            self.assertEqual(route.read_lease(lease_file, INTERFACE, {("198.51.100.2", 24)}, 100), (NEW, None))
+            lease, reason = route.read_lease(lease_file, INTERFACE, {("192.0.2.2", 24)}, 100)
+            self.assertIsNone(lease)
+            self.assertIn("not assigned", reason)
+            self.assertEqual(route.read_lease(lease_file, INTERFACE, {("198.51.100.2", 24)}, 200),
+                             (None, "DHCP lease has expired"))
+            lease_file.write_text(lease_file.read_text().replace("'RENEW'", "'TIMEOUT'"))
+            self.assertEqual(route.read_lease(lease_file, INTERFACE, {("198.51.100.2", 24)}, 100), (NEW, None))
+
+    def test_check_prints_ping_failure_without_restarting_dhcp_or_changing_routes(self):
+        with (
+            patch.object(route, "interface_state", return_value=(True, set())),
+            patch.object(route, "read_lease", return_value=(NEW, None)),
+            patch.object(route, "gateway_replies", return_value=False),
+            patch.object(route, "configure_routes") as configure,
+            patch.object(route, "run") as run,
+            patch.object(route, "report") as report,
+        ):
+            self.assertEqual(route.maintain(INTERFACE, 101, None, check_only=True), 1)
+            self.assertIn("198.51.100.1 did not reply to ping", report.call_args.args[0])
+            configure.assert_not_called()
+            run.assert_not_called()
 
     def test_changed_gateway_replaces_only_selected_table(self):
         reject = {"type": "unreachable", "protocol": "242", "metric": 32760}
@@ -68,7 +87,7 @@ class DhcpRouteTest(unittest.TestCase):
     def test_failed_gateway_is_reprobed_after_restart(self):
         with (
             patch.object(route, "interface_state", return_value=(True, set())),
-            patch.object(route, "read_lease", side_effect=[OLD, NEW, NEW]),
+            patch.object(route, "read_lease", side_effect=[(OLD, None), (NEW, None), (NEW, None)]),
             patch.object(route, "lease_mtime", side_effect=[100, 200, 200]),
             patch.object(route, "gateway_replies", side_effect=[False, True]),
             patch.object(route, "configure_routes") as configure,
@@ -86,7 +105,7 @@ class DhcpRouteTest(unittest.TestCase):
     def test_cooldown_prevents_repeated_restart(self):
         with (
             patch.object(route, "interface_state", return_value=(True, set())),
-            patch.object(route, "read_lease", return_value=None),
+            patch.object(route, "read_lease", return_value=(None, "DHCP lease has expired")),
             patch.object(route, "configure_routes"),
             patch.object(route, "run") as run,
             patch.object(route, "report"),
@@ -98,7 +117,7 @@ class DhcpRouteTest(unittest.TestCase):
     def test_lease_change_during_probe_withdraws_stale_route(self):
         with (
             patch.object(route, "interface_state", return_value=(True, set())),
-            patch.object(route, "read_lease", side_effect=[OLD, NEW]),
+            patch.object(route, "read_lease", side_effect=[(OLD, None), (NEW, None)]),
             patch.object(route, "gateway_replies", return_value=True),
             patch.object(route, "configure_routes") as configure,
             patch.object(route, "report"),

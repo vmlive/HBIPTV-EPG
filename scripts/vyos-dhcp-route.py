@@ -41,26 +41,39 @@ def report(message, priority=syslog.LOG_INFO):
 
 
 def read_lease(path, interface, addresses, now):
+    fields = {}
     try:
-        fields = {}
         for line in path.read_text().splitlines():
             key, sep, value = line.partition("=")
             if sep:
                 fields[key] = value.strip().strip("'")
-        if fields["interface"] != interface or fields["reason"] not in ("BOUND", "RENEW", "REBIND", "REBOOT"):
-            return None
+    except FileNotFoundError:
+        return None, f"DHCP lease record missing at {path}"
+    if fields.get("interface") != interface:
+        return None, "DHCP lease record does not identify this interface"
+    reason = fields.get("reason")
+    # ISC dhclient can reapply a previous lease on TIMEOUT while it is still valid.
+    if reason not in ("BOUND", "RENEW", "REBIND", "REBOOT", "TIMEOUT"):
+        return None, f"DHCP lease state is {reason or 'missing'}"
+    try:
         if int(fields["new_expiry"]) <= now:
-            return None
+            return None, "DHCP lease has expired"
         address = ipaddress.IPv4Interface(f"{fields['new_ip_address']}/{fields['new_subnet_mask']}")
-        if (str(address.ip), address.network.prefixlen) not in addresses:
-            return None
-        for router in fields.get("new_routers", "").split():
-            gateway = ipaddress.IPv4Address(router)
-            if gateway in address.network and gateway != address.ip:
-                return Lease(address, gateway)
-    except (FileNotFoundError, KeyError, ValueError):
-        return None
-    return None
+        routers = [ipaddress.IPv4Address(router) for router in fields.get("new_routers", "").split()]
+    except KeyError as exc:
+        return None, f"DHCP lease record missing field {exc.args[0]}"
+    except ValueError:
+        return None, "DHCP lease record contains an invalid address, subnet, router, or expiry"
+    if (str(address.ip), address.network.prefixlen) not in addresses:
+        current = ", ".join(f"{ip}/{prefix}" for ip, prefix in sorted(addresses)) or "none"
+        return None, f"lease address {address} is not assigned (interface addresses: {current})"
+    if not routers:
+        return None, "DHCP lease does not advertise a router"
+    for gateway in routers:
+        if gateway in address.network and gateway != address.ip:
+            return Lease(address, gateway), None
+    advertised = ", ".join(map(str, routers))
+    return None, f"DHCP routers {advertised} are not usable in {address.network}"
 
 
 def interface_state(interface):
@@ -128,11 +141,14 @@ def lease_mtime(path):
 def maintain(interface, table, state, *, check_only=False):
     path = LEASE_DIR / f"dhclient_{interface}.lease"
     ready, addresses = interface_state(interface)
-    lease = read_lease(path, interface, addresses, time.time()) if ready else None
-    if lease and gateway_replies(interface, lease):
+    lease, problem = read_lease(path, interface, addresses, time.time()) if ready else (None, "link down, waiting for carrier")
+    if lease and not gateway_replies(interface, lease):
+        problem = f"DHCP gateway {lease.gateway} did not reply to ping (lease address {lease.address})"
+        lease = None
+    if lease:
         # The interface or lease can change while ping is in progress.
         ready, addresses = interface_state(interface)
-        validated = read_lease(path, interface, addresses, time.time()) if ready else None
+        validated = read_lease(path, interface, addresses, time.time())[0] if ready else None
         if validated != lease:
             if not check_only:
                 configure_routes(table, interface, None)
@@ -145,18 +161,18 @@ def maintain(interface, table, state, *, check_only=False):
         return 0
 
     if check_only:
-        report(f"{interface}: no active DHCP lease with a responding gateway", syslog.LOG_WARNING)
+        report(f"{interface}: {problem}", syslog.LOG_WARNING)
         return 1
 
     configure_routes(table, interface, None)
     if not ready:
-        report(f"{interface}: link down, waiting for carrier", syslog.LOG_WARNING)
+        report(f"{interface}: {problem}", syslog.LOG_WARNING)
         return 1
 
     last_renew = float(state.read() or "-inf")
     now = time.monotonic()
     if now - last_renew < RENEW_COOLDOWN:
-        report(f"{interface}: gateway unavailable, DHCP restart cooling down", syslog.LOG_WARNING)
+        report(f"{interface}: {problem}, DHCP restart cooling down", syslog.LOG_WARNING)
         return 1
 
     mtime = lease_mtime(path)
@@ -164,7 +180,7 @@ def maintain(interface, table, state, *, check_only=False):
     state.truncate()
     state.write(str(now))
     state.flush()
-    report(f"{interface}: gateway unavailable, restarting DHCP client", syslog.LOG_WARNING)
+    report(f"{interface}: {problem}, restarting DHCP client", syslog.LOG_WARNING)
     run("systemctl", "restart", "--no-block", f"dhclient@{interface}.service")
 
     deadline = time.monotonic() + RENEW_WAIT
@@ -173,10 +189,10 @@ def maintain(interface, table, state, *, check_only=False):
         if (new_mtime := lease_mtime(path)) is None or new_mtime == mtime:
             continue
         ready, addresses = interface_state(interface)
-        lease = read_lease(path, interface, addresses, time.time()) if ready else None
+        lease, _ = read_lease(path, interface, addresses, time.time()) if ready else (None, None)
         if lease and gateway_replies(interface, lease) and lease_mtime(path) == new_mtime:
             ready, addresses = interface_state(interface)
-            if ready and read_lease(path, interface, addresses, time.time()) == lease:
+            if ready and read_lease(path, interface, addresses, time.time())[0] == lease:
                 configure_routes(table, interface, lease)
                 return 0
 

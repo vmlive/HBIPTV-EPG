@@ -34,7 +34,7 @@ set policy local-route rule 101 set table '101'
 
 如果 `dhcp-interface` 换租后仍指向旧网关，可在 VyOS 宿主机运行 [vyos-dhcp-route.py](scripts/vyos-dhcp-route.py)。它使用 DHCP 客户端记录的当前租约，核对接口上的 IPv4 地址，并从电信接口 ping 租约网关。验证后会更新表 101 的默认路由。探测失败时最多每五分钟重启一次电信 DHCP 客户端，并等待新租约后重新探测。等待期间表 101 会拒绝没有其他路由的流量，避免这些请求落到主路由表。
 
-将脚本复制到 VyOS 后，在操作模式下安装并预检。默认处理 `eth0.99` 和表 `101`，预检只读取状态并探测。
+将脚本复制到 VyOS 后，在操作模式下安装并预检。默认处理 `eth0.99` 和表 `101`，预检只读取状态并探测。如果预检失败，输出会说明是接口状态、租约与地址不匹配、租约网关缺失，还是网关没有响应。
 
 ```bash
 sudo install -o root -g root -m 0755 vyos-dhcp-route.py /config/scripts/hbiptv-dhcp-route.py
