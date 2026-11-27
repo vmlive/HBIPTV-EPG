@@ -30,6 +30,18 @@ set policy local-route rule 101 set table '101'
 
 提交后，在 VyOS 操作模式下用 `ip -4 route show table 101` 查看下一跳，并用 `sudo ip -4 route get 192.168.0.23 mark 101 oif eth0.99` 确认选路。若 DHCP 租约没有提供网关，需要在对应表中配置运营商网络实际可用的下一跳。
 
+### 联通经独立 WireGuard 路由表抓取
+
+在 `providers.unicom` 中设置 `"interface": "wg1"` 和 `"fwmark": 103`，鉴权和同一会话中的跳转连接都会使用该标记。若 `wg1` 上的 `Unicom_XFC` 已持有 `0.0.0.0/0`，可把表 103 的默认路由指向 `wg1`，覆盖服务端临时跳转到的 IPv4 地址。先用 `show configuration commands | match 'wireguard.*wg1.*peer.*Unicom_XFC.*allowed-ips'` 核对 peer。
+
+```text
+set protocols static table 103 route 0.0.0.0/0 interface 'wg1'
+set policy local-route rule 103 fwmark '103'
+set policy local-route rule 103 set table '103'
+```
+
+提交后用 `sudo ip -4 route get <联通鉴权目标IP> mark 103 oif wg1` 验证应选到 `dev wg1 table 103`。WireGuard 按 `AllowedIPs` 最长前缀匹配选择 peer。若目标地址同时落在其他 peer 的更具体网段里，需先核对该目标地址应由哪个 peer 承载。
+
 ### 电信抓取前准备表 101
 
 如果 `dhcp-interface` 换租后仍指向旧网关，可在抓取前运行 VyOS 宿主机脚本 [vyos-dhcp-route.py](scripts/vyos-dhcp-route.py)。脚本核对接口 IPv4 地址和当前租约，用 ping 或 ARP 验证租约网关，再通过 VyOS 原生配置会话提交表 101 的默认路由。网关未就绪时，表 101 会保留拒绝路由。若 DHCP 客户端正在等待地址，脚本让它继续尝试。需要续租时，脚本调用 VyOS 的 DHCP 操作命令，随后最多等待八分钟。自动提交只写入运行配置，每天由抓取前的任务重新确认网关。
