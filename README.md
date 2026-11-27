@@ -30,6 +30,40 @@ set policy local-route rule 101 set table '101'
 
 提交后，在 VyOS 操作模式下用 `ip -4 route show table 101` 查看下一跳，并用 `sudo ip -4 route get 192.168.0.23 mark 101 oif eth0.99` 确认选路。若 DHCP 租约没有提供网关，需要在对应表中配置运营商网络实际可用的下一跳。
 
+### 电信 DHCP 换租后刷新表 101
+
+如果 `dhcp-interface` 换租后仍指向旧网关，可在 VyOS 宿主机运行 [vyos-dhcp-route.py](scripts/vyos-dhcp-route.py)。它使用 DHCP 客户端记录的当前租约，核对接口上的 IPv4 地址，并从电信接口 ping 租约网关。验证后会更新表 101 的默认路由。探测失败时最多每五分钟重启一次电信 DHCP 客户端，并等待新租约后重新探测。等待期间表 101 会拒绝没有其他路由的流量，避免这些请求落到主路由表。
+
+将脚本复制到 VyOS 后，在操作模式下安装并预检。默认处理 `eth0.99` 和表 `101`，预检只读取状态并探测。
+
+```bash
+sudo install -o root -g root -m 0755 vyos-dhcp-route.py /config/scripts/hbiptv-dhcp-route.py
+sudo /config/scripts/hbiptv-dhcp-route.py --check
+```
+
+预检通过后，在配置模式下移除表 101 原有的默认路由配置，由脚本单独管理该默认路由。保留 `fwmark 101` 的选表规则和容器中电信的标记配置。
+
+```text
+configure
+delete protocols static table 101 route 0.0.0.0/0
+set system task-scheduler task hbiptv-dhcp-route executable path '/config/scripts/hbiptv-dhcp-route.py'
+set system task-scheduler task hbiptv-dhcp-route interval '1m'
+commit
+save
+exit
+```
+
+在操作模式下手动运行一次并检查结果。
+
+```bash
+sudo /config/scripts/hbiptv-dhcp-route.py
+ip -4 route show table 101
+sudo ip -4 route get 192.168.0.23 mark 101 oif eth0.99
+sudo journalctl -t hbiptv-dhcp-route -n 20
+```
+
+正常时表 101 中应有指向当前 DHCP 网关的默认路由。若脚本报告 `unmanaged default route`，请先核对表 101 中是否还有手动添加的默认路由。最后进入容器运行 `python -m iptv_epg once --provider telecom`，检查本地节目单是否更新。
+
 ## 本地产物
 
 每家运营商写入单独的目录。以电信为例，容器内的文件是 `/data/telecom/PL.xml`、`PL.xml.gz`、`rtp2http.m3u` 和 `logo/*.png`。下面的部署示例会把这些文件分别保存到 VyOS 的 `/config/hbiptv-epg/data/` 或 Compose 项目的 `./data/`。
