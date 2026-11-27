@@ -15,11 +15,11 @@ import time
 
 LEASE_DIR = Path("/run/dhclient")
 STATE_DIR = Path("/run/hbiptv-dhcp-route")
-PROTOCOL = 242
-DEFAULT_METRIC = 100
-REJECT_METRIC = 32760
+ROUTE_DESCRIPTION = "HBIPTV-managed DHCP default"
+REJECT_DISTANCE = "254"
+DHCP_RENEW = "/usr/libexec/vyos/op_mode/dhcp.py"
 RENEW_COOLDOWN = 300
-RENEW_WAIT = 45
+RENEW_WAIT = 480
 
 
 @dataclass(frozen=True)
@@ -107,54 +107,55 @@ def gateway_replies(interface, lease):
     return "ARP" if result.returncode == 0 else None
 
 
-def table_defaults(table):
-    result = run("ip", "-j", "-4", "route", "show", "table", str(table), "default", check=False)
-    if result.returncode:
-        if "FIB table does not exist" in result.stderr:
-            return []
-        result.check_returncode()
-    return json.loads(result.stdout or "[]")
+def active_config(path):
+    from vyos.config import Config
+
+    config = Config()
+    return config.get_config_dict(path, effective=True, get_first_key=True) if config.exists_effective(path) else {}
 
 
-def owned(route):
-    return str(route.get("protocol")) == str(PROTOCOL)
+def commit_default(path, current, interface, gateway):
+    from vyos.configsession import ConfigSession, ConfigSessionError
+
+    try:
+        session = ConfigSession(os.getpid(), app="hbiptv-dhcp-route")
+        if active_config(path) != current:
+            raise RuntimeError(f"table {path[3]}: default route changed while opening the configuration session")
+        if current:
+            session.delete(path)
+        session.set([*path, "description"], ROUTE_DESCRIPTION)
+        session.set([*path, "reject", "distance"], REJECT_DISTANCE)
+        if gateway:
+            session.set([*path, "next-hop", gateway, "interface"], interface)
+        session.commit()
+    except ConfigSessionError as exc:
+        raise RuntimeError(f"VyOS could not commit table {path[3]}: {exc}") from exc
 
 
 def configure_routes(table, interface, lease):
-    routes = table_defaults(table)
-    if any(not owned(route) for route in routes):
-        raise RuntimeError(f"table {table}: found an unmanaged default route")
-    base = ("ip", "-4", "route")
-    tag = ("table", str(table), "proto", str(PROTOCOL))
-    if not any(route.get("type") == "unreachable" and route.get("metric") == REJECT_METRIC for route in routes):
-        run(*base, "replace", "unreachable", "default", *tag, "metric", str(REJECT_METRIC))
-    active = [route for route in routes if route.get("metric") == DEFAULT_METRIC]
-    if lease is None:
-        if active:
-            run(*base, "del", "default", *tag, "metric", str(DEFAULT_METRIC))
+    path = ["protocols", "static", "table", str(table), "route", "0.0.0.0/0"]
+    current = active_config(path)
+    if current and current.get("description") != ROUTE_DESCRIPTION:
+        raise RuntimeError(f"table {table}: found an unmanaged default route in VyOS configuration")
+    gateway = str(lease.gateway) if lease else None
+    target = {
+        "description": ROUTE_DESCRIPTION,
+        "reject": {"distance": REJECT_DISTANCE},
+    }
+    if gateway:
+        target["next-hop"] = {gateway: {"interface": interface}}
+    if current == target:
         return
-    gateway = str(lease.gateway)
-    source = str(lease.address.ip)
-    if any(
-        route.get("gateway") == gateway and route.get("dev") == interface and route.get("prefsrc") == source
-        for route in active
-    ):
-        return
-    run(*base, "replace", "default", "via", gateway, "dev", interface, "src", source,
-        *tag, "metric", str(DEFAULT_METRIC))
-    report(f"table {table}: default via {gateway} dev {interface} src {source}")
-
-
-def lease_mtime(path):
-    try:
-        return path.stat().st_mtime_ns
-    except FileNotFoundError:
-        return None
+    commit_default(path, current, interface, gateway)
+    if gateway:
+        report(f"table {table}: committed default via {gateway} dev {interface}")
+    else:
+        report(f"table {table}: committed reject route while waiting for DHCP")
 
 
 def maintain(interface, table, state, *, check_only=False):
     path = LEASE_DIR / f"dhclient_{interface}.lease"
-    ready, addresses = interface_state(interface)
+    ready, addresses = interface_state(interface, allow_missing=True)
     lease, problem = read_lease(path, interface, addresses, time.time()) if ready else (None, "link down, waiting for carrier")
     probe = gateway_replies(interface, lease) if lease else None
     if probe:
@@ -179,38 +180,34 @@ def maintain(interface, table, state, *, check_only=False):
         return 1
 
     configure_routes(table, interface, None)
-    if not ready:
-        report(f"{interface}: {problem}", syslog.LOG_WARNING)
-        return 1
-
     last_renew = float(state.read() or "-inf")
     now = time.monotonic()
-    if now - last_renew < RENEW_COOLDOWN:
-        report(f"{interface}: {problem}, DHCP restart cooling down", syslog.LOG_WARNING)
-        return 1
-
-    mtime = lease_mtime(path)
-    state.seek(0)
-    state.truncate()
-    state.write(str(now))
-    state.flush()
-    report(f"{interface}: {problem}, restarting DHCP client", syslog.LOG_WARNING)
-    run("systemctl", "restart", "--no-block", f"dhclient@{interface}.service")
+    if not ready:
+        report(f"{interface}: {problem}", syslog.LOG_WARNING)
+    elif not addresses and run("systemctl", "is-active", "--quiet", f"dhclient@{interface}.service", check=False).returncode == 0:
+        report(f"{interface}: DHCP client is acquiring an address")
+    elif now - last_renew < RENEW_COOLDOWN:
+        report(f"{interface}: {problem}, waiting during DHCP restart cooldown", syslog.LOG_WARNING)
+    else:
+        state.seek(0)
+        state.truncate()
+        state.write(str(now))
+        state.flush()
+        report(f"{interface}: {problem}, requesting VyOS DHCP renewal", syslog.LOG_WARNING)
+        run(DHCP_RENEW, "renew_client_lease", "--family", "inet", "--interface", interface, timeout=30)
 
     deadline = time.monotonic() + RENEW_WAIT
     while time.monotonic() < deadline:
-        time.sleep(2)
-        if (new_mtime := lease_mtime(path)) is None or new_mtime == mtime:
-            continue
+        time.sleep(5)
         ready, addresses = interface_state(interface, allow_missing=True)
         lease, _ = read_lease(path, interface, addresses, time.time()) if ready else (None, None)
-        if lease and gateway_replies(interface, lease) and lease_mtime(path) == new_mtime:
+        if lease and gateway_replies(interface, lease):
             ready, addresses = interface_state(interface, allow_missing=True)
             if ready and read_lease(path, interface, addresses, time.time())[0] == lease:
                 configure_routes(table, interface, lease)
                 return 0
 
-    report(f"{interface}: no usable lease after DHCP restart, retry on the next run", syslog.LOG_WARNING)
+    report(f"{interface}: no usable DHCP lease or gateway before the preparation deadline", syslog.LOG_WARNING)
     return 1
 
 
@@ -241,7 +238,7 @@ def main():
             return maintain(args.interface, args.table, state)
     except subprocess.CalledProcessError as exc:
         report(f"{exc.cmd[0]} exited with {exc.returncode}: {exc.stderr.strip()}", syslog.LOG_ERR)
-    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
+    except (ImportError, OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
         report(str(exc), syslog.LOG_ERR)
     return 1
 

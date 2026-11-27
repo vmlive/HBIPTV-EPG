@@ -128,11 +128,11 @@ def write_guide(stage, data, label):
 
 
 def save_local(stage, output):
-    (output / "logo").mkdir(parents=True, exist_ok=True)
     for path in stage.rglob("*"):
         if path.is_file():
             # Use a temporary file on the destination filesystem for an atomic replacement.
             destination = output / path.relative_to(stage)
+            destination.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as temp:
                 temp_path = Path(temp.name)
             try:
@@ -142,7 +142,7 @@ def save_local(stage, output):
                 temp_path.unlink(missing_ok=True)
 
 
-def collect(name, config, data_dir):
+def collect(name, config, data_dir, *, logos_only=False):
     module, label = PROVIDERS[name]
     interface, fwmark, auth = provider_config(config, name)
     with provider_lock(data_dir, name):
@@ -159,18 +159,25 @@ def collect(name, config, data_dir):
                 channels = module.get_channel_list(session)
                 if not channels:
                     raise RuntimeError("运营商未返回有效频道")
+                if logos_only:
+                    logo_dir = stage / "logo"
+                    download_logos(session, channels, logo_dir, module.authenticate)
+                    logos = sum(1 for _ in logo_dir.glob("*.png"))
+                    if not logos:
+                        raise RuntimeError("未下载到 Logo，保留已有图片")
+                    save_local(stage, data_dir / name)
+                    logger.info("%s 已更新 %s 张 Logo", name, logos)
+                    return
                 data = get_all_epg(session, channels, module.authenticate, reauth_on_503=name != "unicom")
                 count = write_guide(stage, data, label)
-                download_logos(session, channels, stage / "logo", module.authenticate)
             base_url = config.get("playlist_base_url")
             prefix = f"{base_url}/{name}/" if base_url else ""
             write_playlist(stage / "rtp2http.m3u", channels, label, prefix)
             save_local(stage, data_dir / name)
-            logos = sum(1 for _ in (stage / "logo").glob("*.png"))
-            logger.info("%s 已生成 %s 个频道、%s 条节目和 %s 张 Logo", name, len(channels), count, logos)
+            logger.info("%s 已生成 %s 个频道和 %s 条节目", name, len(channels), count)
 
 
-def run_batch(config_path, data_dir, provider):
+def run_batch(config_path, data_dir, provider, *, logos_only=False):
     try:
         config = load_config(config_path)
         selected = [
@@ -194,7 +201,7 @@ def run_batch(config_path, data_dir, provider):
     failures = 0
     for name in selected:
         try:
-            collect(name, config, data_dir)
+            collect(name, config, data_dir, logos_only=logos_only)
         except (ValueError, RuntimeError) as exc:
             logger.error("%s 抓取失败。%s", name, exc)
             failures += 1
@@ -220,11 +227,12 @@ def main():
     parser.add_argument("--config", type=Path, default=Path("/run/iptv/config.json"))
     parser.add_argument("--data", type=Path, default=Path("/data"))
     mode = parser.add_subparsers(dest="mode", required=True)
-    for command in ("once", "schedule"):
-        subparser = mode.add_parser(command)
+    modes = {"once": "立即更新 EPG 和播放列表", "schedule": "定时更新 EPG 和播放列表", "logos": "手动下载频道 Logo"}
+    for command, help_text in modes.items():
+        subparser = mode.add_parser(command, help=help_text)
         # Older deployments may still pass this option.
         subparser.add_argument("--no-upload", action="store_true", help=argparse.SUPPRESS)
-        if command == "once":
+        if command in ("once", "logos"):
             subparser.add_argument("--provider", choices=PROVIDERS)
         else:
             subparser.add_argument("--at", type=parse_run_at, default=os.getenv("EPG_RUN_AT", "04:00"))
@@ -232,8 +240,8 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     os.environ["TZ"] = TZ
     time.tzset()
-    if args.mode == "once":
-        return run_batch(args.config, args.data, args.provider)
+    if args.mode in ("once", "logos"):
+        return run_batch(args.config, args.data, args.provider, logos_only=args.mode == "logos")
 
     local_tz = ZoneInfo(TZ)
     while True:

@@ -4,9 +4,10 @@ import ipaddress
 from pathlib import Path
 from subprocess import CompletedProcess
 import sys
+from types import ModuleType
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import call, patch
+from unittest.mock import Mock, call, patch
 
 
 script = Path(__file__).resolve().parents[1] / "scripts/vyos-dhcp-route.py"
@@ -21,11 +22,6 @@ NEW = route.Lease(ipaddress.IPv4Interface("198.51.100.2/24"), ipaddress.IPv4Addr
 
 
 class DhcpRouteTest(unittest.TestCase):
-    def test_uncreated_routing_table(self):
-        missing = CompletedProcess([], 2, "[\n", "Error: ipv4: FIB table does not exist.")
-        with patch.object(route, "run", return_value=missing):
-            self.assertEqual(route.table_defaults(101), [])
-
     def test_missing_interface_can_be_transient(self):
         for result in (
             CompletedProcess([], 0, "[]", ""),
@@ -89,39 +85,52 @@ class DhcpRouteTest(unittest.TestCase):
             configure.assert_not_called()
             run.assert_not_called()
 
-    def test_changed_gateway_replaces_only_selected_table(self):
-        reject = {"type": "unreachable", "protocol": "242", "metric": 32760}
-        old_default = {
-            "protocol": "242", "metric": 100, "dev": INTERFACE, "gateway": str(OLD.gateway),
-            "prefsrc": str(OLD.address.ip),
-        }
+    def test_native_configuration_transaction_has_only_the_managed_default(self):
+        path = ["protocols", "static", "table", "101", "route", "0.0.0.0/0"]
+        old_default = {"description": route.ROUTE_DESCRIPTION, "next-hop": {str(OLD.gateway): {"interface": INTERFACE}}}
+        session = Mock()
+        api = ModuleType("vyos.configsession")
+        api.ConfigSession = Mock(return_value=session)
+        api.ConfigSessionError = RuntimeError
         with (
-            patch.object(route, "table_defaults", return_value=[reject, old_default]),
-            patch.object(route, "run") as run,
+            patch.dict(sys.modules, {"vyos.configsession": api}),
+            patch.object(route, "active_config", return_value=old_default),
             patch.object(route, "report"),
         ):
             route.configure_routes(101, INTERFACE, NEW)
-            run.assert_called_once_with(
-                "ip", "-4", "route", "replace", "default", "via", str(NEW.gateway), "dev", INTERFACE,
-                "src", str(NEW.address.ip), "table", "101", "proto", "242", "metric", "100",
-            )
+        self.assertEqual(session.mock_calls, [
+            call.delete(path),
+            call.set([*path, "description"], route.ROUTE_DESCRIPTION),
+            call.set([*path, "reject", "distance"], "254"),
+            call.set([*path, "next-hop", str(NEW.gateway), "interface"], INTERFACE),
+            call.commit(),
+        ])
+
+    def test_unchanged_default_skips_commit(self):
+        current = {
+            "description": route.ROUTE_DESCRIPTION,
+            "reject": {"distance": "254"},
+            "next-hop": {str(NEW.gateway): {"interface": INTERFACE}},
+        }
+        with patch.object(route, "active_config", return_value=current), patch.object(route, "commit_default") as commit:
+            route.configure_routes(101, INTERFACE, NEW)
+            commit.assert_not_called()
 
     def test_other_default_owner_is_preserved(self):
         with (
-            patch.object(route, "table_defaults", return_value=[{"protocol": "static", "gateway": str(OLD.gateway)}]),
-            patch.object(route, "run") as run,
+            patch.object(route, "active_config", return_value={"next-hop": {str(OLD.gateway): {}}}),
+            patch.object(route, "commit_default") as commit,
         ):
             with self.assertRaisesRegex(RuntimeError, "unmanaged"):
                 route.configure_routes(101, INTERFACE, NEW)
-            run.assert_not_called()
+            commit.assert_not_called()
 
     def test_failed_gateway_is_reprobed_after_restart(self):
         with (
             patch.object(
-                route, "interface_state", side_effect=[(True, set()), (False, set()), (True, set()), (True, set())]
+                route, "interface_state", side_effect=[(True, {("192.0.2.2", 24)}), (False, set()), (True, set()), (True, set())]
             ),
             patch.object(route, "read_lease", side_effect=[(OLD, None), (NEW, None), (NEW, None)]),
-            patch.object(route, "lease_mtime", side_effect=[100, 200, 200, 200]),
             patch.object(route, "gateway_replies", side_effect=[None, "ICMP"]),
             patch.object(route, "configure_routes") as configure,
             patch.object(route, "run") as run,
@@ -132,17 +141,32 @@ class DhcpRouteTest(unittest.TestCase):
             state = io.StringIO()
             self.assertEqual(route.maintain(INTERFACE, 101, state), 0)
             self.assertEqual(configure.call_args_list, [call(101, INTERFACE, None), call(101, INTERFACE, NEW)])
-            run.assert_called_once_with("systemctl", "restart", "--no-block", "dhclient@eth0.99.service")
+            run.assert_called_once_with(route.DHCP_RENEW, "renew_client_lease", "--family", "inet", "--interface", INTERFACE, timeout=30)
             self.assertEqual(state.getvalue(), "500")
+
+    def test_active_client_without_address_is_allowed_to_finish(self):
+        with (
+            patch.object(route, "interface_state", side_effect=[(True, set()), (True, set()), (True, set())]),
+            patch.object(route, "read_lease", side_effect=[(None, "lease missing"), (NEW, None), (NEW, None)]),
+            patch.object(route, "gateway_replies", return_value="ICMP"),
+            patch.object(route, "configure_routes") as configure,
+            patch.object(route, "run", return_value=CompletedProcess([], 0)) as run,
+            patch.object(route, "report"),
+            patch.object(route.time, "monotonic", return_value=500),
+            patch.object(route.time, "sleep"),
+        ):
+            self.assertEqual(route.maintain(INTERFACE, 101, io.StringIO()), 0)
+            self.assertEqual(configure.call_args_list, [call(101, INTERFACE, None), call(101, INTERFACE, NEW)])
+            run.assert_called_once_with("systemctl", "is-active", "--quiet", "dhclient@eth0.99.service", check=False)
 
     def test_cooldown_prevents_repeated_restart(self):
         with (
-            patch.object(route, "interface_state", return_value=(True, set())),
+            patch.object(route, "interface_state", return_value=(True, {("192.0.2.2", 24)})),
             patch.object(route, "read_lease", return_value=(None, "DHCP lease has expired")),
             patch.object(route, "configure_routes"),
             patch.object(route, "run") as run,
             patch.object(route, "report"),
-            patch.object(route.time, "monotonic", return_value=500),
+            patch.object(route.time, "monotonic", side_effect=[500, 500, 981]),
         ):
             self.assertEqual(route.maintain(INTERFACE, 101, io.StringIO("400")), 1)
             run.assert_not_called()

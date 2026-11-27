@@ -1,6 +1,6 @@
 # 河北 IPTV EPG 定时抓取
 
-容器每天抓取河北电信、移动和联通的节目单、播放列表和频道 Logo。产物保存在挂载的本地数据目录，可由 VyOS 脚本读取和分发。Python 和 `pycryptodome` 由镜像提供。VyOS 1.5.1 可用原生 `container` 命令部署，也可在 Linux 上用 Docker Compose 运行。
+容器每天抓取河北电信、移动和联通的节目单及播放列表。频道 Logo 可以手动更新。产物保存在挂载的本地数据目录，可由 VyOS 脚本读取和分发。Python 和 `pycryptodome` 由镜像提供。VyOS 1.5.1 可用原生 `container` 命令部署，也可在 Linux 上用 Docker Compose 运行。
 
 ## 配置运营商和出站网卡
 
@@ -30,9 +30,9 @@ set policy local-route rule 101 set table '101'
 
 提交后，在 VyOS 操作模式下用 `ip -4 route show table 101` 查看下一跳，并用 `sudo ip -4 route get 192.168.0.23 mark 101 oif eth0.99` 确认选路。若 DHCP 租约没有提供网关，需要在对应表中配置运营商网络实际可用的下一跳。
 
-### 电信 DHCP 换租后刷新表 101
+### 电信抓取前准备表 101
 
-如果 `dhcp-interface` 换租后仍指向旧网关，可在 VyOS 宿主机运行 [vyos-dhcp-route.py](scripts/vyos-dhcp-route.py)。它使用 DHCP 客户端记录的当前租约，核对接口上的 IPv4 地址，从电信接口 ping 租约网关，未收到 ICMP 响应时用 VyOS 自带的 `arping` 检查网关的二层可达性。任一探测通过后就可以更新表 101 的默认路由。两项探测都失败时，最多每五分钟重启一次电信 DHCP 客户端，并轮询最多 45 秒等待接口和新租约恢复后重新探测。等待期间表 101 会拒绝没有其他路由的流量，避免这些请求落到主路由表。
+如果 `dhcp-interface` 换租后仍指向旧网关，可在抓取前运行 VyOS 宿主机脚本 [vyos-dhcp-route.py](scripts/vyos-dhcp-route.py)。脚本核对接口 IPv4 地址和当前租约，用 ping 或 ARP 验证租约网关，再通过 VyOS 原生配置会话提交表 101 的默认路由。网关未就绪时，表 101 会保留拒绝路由。若 DHCP 客户端正在等待地址，脚本让它继续尝试。需要续租时，脚本调用 VyOS 的 DHCP 操作命令，随后最多等待八分钟。自动提交只写入运行配置，每天由抓取前的任务重新确认网关。
 
 将脚本复制到 VyOS 后，在操作模式下安装并预检。默认处理 `eth0.99` 和表 `101`，预检只读取状态并探测。如果预检失败，输出会说明是接口状态、租约与地址不匹配、租约网关缺失，还是 ICMP 和 ARP 都无响应。通过 ARP 预检后，仍可用一次电信抓取验证网关转发和鉴权。
 
@@ -41,19 +41,20 @@ sudo install -o root -g root -m 0755 vyos-dhcp-route.py /config/scripts/hbiptv-d
 sudo /config/scripts/hbiptv-dhcp-route.py --check
 ```
 
-预检通过后，在配置模式下移除表 101 原有的默认路由配置，由脚本单独管理该默认路由。保留 `fwmark 101` 的选表规则和容器中电信的标记配置。
+预检通过后，在配置模式下移除表 101 原有的默认路由配置，由脚本单独管理该默认路由。保留 `fwmark 101` 的选表规则和容器中电信的标记配置。以下配置按 VyOS 宿主机时区每天 `03:50` 执行。若修改了容器的 `EPG_RUN_AT`，同步调整这个时间，给 DHCP 留出约十分钟。
 
 ```text
 configure
 delete protocols static table 101 route 0.0.0.0/0
+delete system task-scheduler task hbiptv-dhcp-route interval
 set system task-scheduler task hbiptv-dhcp-route executable path '/config/scripts/hbiptv-dhcp-route.py'
-set system task-scheduler task hbiptv-dhcp-route interval '1m'
+set system task-scheduler task hbiptv-dhcp-route crontab-spec '50 3 * * *'
 commit
 save
 exit
 ```
 
-在操作模式下手动运行一次并检查结果。
+前两条 `delete` 用于迁移已有配置，新部署可跳过不存在的项目。如果表 101 仍有旧脚本留下的 `proto 242` 默认路由，可在操作模式下用 `sudo ip -4 route flush table 101 proto 242` 做一次清理。随后手动运行一次并检查结果。
 
 ```bash
 sudo /config/scripts/hbiptv-dhcp-route.py
@@ -62,7 +63,7 @@ sudo ip -4 route get 192.168.0.23 mark 101 oif eth0.99
 sudo journalctl -t hbiptv-dhcp-route -n 20
 ```
 
-正常时表 101 中应有指向当前 DHCP 网关的默认路由。若脚本报告 `unmanaged default route`，请先核对表 101 中是否还有手动添加的默认路由。最后进入容器运行 `python -m iptv_epg once --provider telecom`，检查本地节目单是否更新。
+正常时表 101 中应有指向当前 DHCP 网关的默认路由。若脚本报告 `unmanaged default route`，请先核对 VyOS 运行配置里的表 101 默认路由。最后进入容器运行 `python -m iptv_epg once --provider telecom`，检查本地节目单是否更新。白天需要手动抓取电信时，也可以先手动运行一次这个准备脚本。
 
 ## 本地产物
 
@@ -106,6 +107,12 @@ show container log hbiptv-epg
 
 在操作模式下运行 `connect container hbiptv-epg` 进入容器。执行 `python -m iptv_epg once` 立即抓取，用 `exit` 返回 VyOS 后检查宿主机 `/config/hbiptv-epg/data/` 中的产物。定时任务默认每天北京时间 04:00 执行。
 
+### 单独验证联通和更新 Logo
+
+进入容器后运行 `python -m iptv_epg once --provider unicom`。成功后检查宿主机的 `/config/hbiptv-epg/data/unicom/PL.xml.gz` 和 `rtp2http.m3u`。如果联通仍使用 `wg1`，可在 VyOS 操作模式下用 `sudo wg show wg1 allowed-ips` 核对联通服务地址是否由 `Unicom_XFC` 覆盖。
+
+手动更新联通 Logo 用 `python -m iptv_epg logos --provider unicom`。把运营商换为 `telecom` 或 `cmcc` 可更新另一家，省略 `--provider` 会更新所有已启用运营商。Logo 命令只写各自的 `logo/`，定时任务与 `once` 会保留已有图片。
+
 ## 用 Docker Compose 运行
 
 从源码构建时运行：
@@ -118,6 +125,7 @@ docker compose build
 
 ```bash
 docker compose run --rm epg once
+docker compose run --rm epg logos --provider unicom
 docker compose up -d epg
 docker compose logs -f epg
 ```

@@ -43,6 +43,7 @@ class IPTVFixture(BaseHTTPRequestHandler):
 
     def do_POST(self):
         route = self.path.rsplit("/", 1)[-1]
+        self.server.routes.append(route)
         body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
         if route.startswith("authLogin"):
             self.send_fixture('EncryptToken = "ABC123"; userToken.value = "DEF456"')
@@ -76,6 +77,7 @@ class SmokeTest(unittest.TestCase):
     def test_provider_batch_and_empty_epg(self):
         with ThreadingHTTPServer(("127.0.0.1", 0), IPTVFixture) as server, TemporaryDirectory() as temp:
             server.empty_guide = False
+            server.routes = []
             worker = Thread(target=server.serve_forever, daemon=True)
             worker.start()
             self.addCleanup(worker.join)
@@ -95,6 +97,9 @@ class SmokeTest(unittest.TestCase):
             config = root / "config.json"
             config.write_text(json.dumps({"providers": providers}), encoding="utf-8")
             data = root / "data"
+            previous_logo = data / "telecom/logo/101.png"
+            previous_logo.parent.mkdir(parents=True)
+            previous_logo.write_bytes(b"existing logo")
             command = [
                 sys.executable, "-m", "iptv_epg", "--config", str(config),
                 "--data", str(data), "once",
@@ -115,7 +120,34 @@ class SmokeTest(unittest.TestCase):
                 self.assertIn('x-tvg-url="PL.xml.gz"', playlist)
                 self.assertIn('tvg-logo="logo/101.png"', playlist)
                 self.assertIn("rtp://239.1.2.3:1234", playlist)
-                self.assertTrue((output / "logo/101.png").is_file())
+            self.assertNotIn("QueryPlaybillContext", server.routes)
+            self.assertEqual(previous_logo.read_bytes(), b"existing logo")
+            self.assertFalse((data / "unicom/logo/101.png").exists())
+
+            server.routes.clear()
+            result = subprocess.run([*command, "--provider", "unicom"], capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(server.routes[:5], [
+                "authLoginHWCU.jsp", "ValidAuthenticationHWCU.jsp", "getchannellistHWCU.jsp",
+                "authLoginHWCU.jsp", "ValidAuthenticationHWCU.jsp",
+            ])
+            self.assertEqual(server.routes[5:], ["QueryPlaybillList"] * 8)
+
+            unicom_output = data / "unicom"
+            original_outputs = {
+                name: (unicom_output / name).stat().st_mtime_ns
+                for name in ("PL.xml", "PL.xml.gz", "rtp2http.m3u")
+            }
+            server.routes.clear()
+            result = subprocess.run(
+                [*command[:-1], "logos", "--provider", "unicom"], capture_output=True, text=True, timeout=30
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("QueryPlaybillContext", server.routes)
+            self.assertNotIn("QueryPlaybillList", server.routes)
+            self.assertTrue((unicom_output / "logo/101.png").is_file())
+            for name, mtime in original_outputs.items():
+                self.assertEqual((unicom_output / name).stat().st_mtime_ns, mtime)
 
             # Force the first provider to fail and confirm the others still run.
             providers["telecom"]["interface"] = "missing0"
