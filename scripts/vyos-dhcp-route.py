@@ -76,17 +76,16 @@ def read_lease(path, interface, addresses, now):
     return None, f"DHCP routers {advertised} are not usable in {address.network}"
 
 
-def interface_state(interface, *, allow_missing=False):
+def interface_state(interface):
     result = run("ip", "-j", "-4", "addr", "show", "dev", interface, check=False)
     if result.returncode:
-        if allow_missing and ("does not exist" in result.stderr or "Cannot find device" in result.stderr):
+        error = result.stderr.lower()
+        if any(message in error for message in ("does not exist", "cannot find device", "no such device")):
             return False, set()
         result.check_returncode()
-    links = json.loads(result.stdout)
+    links = json.loads(result.stdout or "[]")
     if not links:
-        if allow_missing:
-            return False, set()
-        raise RuntimeError(f"{interface}: interface missing")
+        return False, set()
     link = links[0]
     flags = set(link.get("flags", []))
     addresses = {(a["local"], a["prefixlen"]) for a in link.get("addr_info", []) if a["family"] == "inet"}
@@ -103,8 +102,31 @@ def gateway_replies(interface, lease):
         str(lease.gateway), check=False,
     )
     if result.returncode not in (0, 1):
+        ready, addresses = interface_state(interface)
+        if not ready or (str(lease.address.ip), lease.address.network.prefixlen) not in addresses:
+            return None
         raise RuntimeError(f"{interface}: ARP probe failed: {result.stderr.strip()}")
     return "ARP" if result.returncode == 0 else None
+
+
+def ensure_oif_rule(interface, table, priority):
+    rules = json.loads(run("ip", "-N", "-j", "-4", "rule", "show").stdout)
+    at_priority = [rule for rule in rules if rule.get("priority") == priority]
+    if at_priority:
+        rule = at_priority[0]
+        if (
+            len(at_priority) == 1
+            and (rule.get("oif") or rule.get("oifname")) == interface
+            and str(rule.get("table")) == str(table)
+            and rule.get("src", "all") == "all"
+            and rule.get("dst", "all") == "all"
+            and set(rule) <= {"priority", "oif", "oifname", "oif_detached", "src", "dst", "table", "flags", "protocol"}
+        ):
+            report(f"priority {priority}: oif {interface} already uses table {table}")
+            return
+        raise RuntimeError(f"policy-rule priority {priority} is already in use")
+    run("ip", "-4", "rule", "add", "pref", str(priority), "oif", interface, "lookup", str(table))
+    report(f"priority {priority}: oif {interface} now uses table {table}")
 
 
 def active_config(path):
@@ -153,27 +175,27 @@ def configure_routes(table, interface, lease):
         report(f"table {table}: committed reject route while waiting for DHCP")
 
 
-def maintain(interface, table, state, *, check_only=False):
+def maintain(interface, table, state, *, check_only=False, wait_seconds=RENEW_WAIT):
     path = LEASE_DIR / f"dhclient_{interface}.lease"
-    ready, addresses = interface_state(interface, allow_missing=True)
-    lease, problem = read_lease(path, interface, addresses, time.time()) if ready else (None, "link down, waiting for carrier")
+    ready, addresses = interface_state(interface)
+    lease, problem = read_lease(path, interface, addresses, time.time()) if ready else (None, "interface absent or link down")
     probe = gateway_replies(interface, lease) if lease else None
-    if probe:
-        # The interface or lease can change while ping is in progress.
-        ready, addresses = interface_state(interface, allow_missing=True)
+    lease_changed = False
+    if lease:
+        # Recheck after even a failed probe, since DHCP can replace the link mid-probe.
+        ready, addresses = interface_state(interface)
         validated = read_lease(path, interface, addresses, time.time())[0] if ready else None
-        if validated != lease:
-            if not check_only:
-                configure_routes(table, interface, None)
-            report(f"{interface}: DHCP changed during the gateway probe, retry on the next run")
-            return 1
+        lease_changed = validated != lease
+    if probe and not lease_changed:
         if check_only:
             report(f"{interface}: {lease.address}, DHCP gateway {lease.gateway} replied to {probe}")
         else:
             configure_routes(table, interface, lease)
         return 0
 
-    if lease:
+    if lease_changed:
+        problem = "interface or DHCP lease changed during the gateway probe"
+    elif lease:
         problem = f"DHCP gateway {lease.gateway} did not reply to ICMP or ARP (lease address {lease.address})"
     if check_only:
         report(f"{interface}: {problem}", syslog.LOG_WARNING)
@@ -182,9 +204,11 @@ def maintain(interface, table, state, *, check_only=False):
     configure_routes(table, interface, None)
     last_renew = float(state.read() or "-inf")
     now = time.monotonic()
-    if not ready:
+    if lease_changed or not ready:
         report(f"{interface}: {problem}", syslog.LOG_WARNING)
-    elif not addresses and run("systemctl", "is-active", "--quiet", f"dhclient@{interface}.service", check=False).returncode == 0:
+    elif not addresses and run(
+        "systemctl", "show", "--property=ActiveState", "--value", f"dhclient@{interface}.service", check=False
+    ).stdout.strip() in ("active", "activating", "reloading"):
         report(f"{interface}: DHCP client is acquiring an address")
     elif now - last_renew < RENEW_COOLDOWN:
         report(f"{interface}: {problem}, waiting during DHCP restart cooldown", syslog.LOG_WARNING)
@@ -194,15 +218,18 @@ def maintain(interface, table, state, *, check_only=False):
         state.write(str(now))
         state.flush()
         report(f"{interface}: {problem}, requesting VyOS DHCP renewal", syslog.LOG_WARNING)
-        run(DHCP_RENEW, "renew_client_lease", "--family", "inet", "--interface", interface, timeout=30)
+        try:
+            run(DHCP_RENEW, "renew_client_lease", "--family", "inet", "--interface", interface, timeout=30)
+        except subprocess.TimeoutExpired:
+            report(f"{interface}: DHCP renewal command timed out, checking for a new lease", syslog.LOG_WARNING)
 
-    deadline = time.monotonic() + RENEW_WAIT
-    while time.monotonic() < deadline:
-        time.sleep(5)
-        ready, addresses = interface_state(interface, allow_missing=True)
+    deadline = time.monotonic() + wait_seconds
+    while (remaining := deadline - time.monotonic()) > 0:
+        time.sleep(min(5, remaining))
+        ready, addresses = interface_state(interface)
         lease, _ = read_lease(path, interface, addresses, time.time()) if ready else (None, None)
         if lease and gateway_replies(interface, lease):
-            ready, addresses = interface_state(interface, allow_missing=True)
+            ready, addresses = interface_state(interface)
             if ready and read_lease(path, interface, addresses, time.time())[0] == lease:
                 configure_routes(table, interface, lease)
                 return 0
@@ -215,12 +242,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--interface", default="eth0.99")
     parser.add_argument("--table", type=int, default=101)
-    parser.add_argument("--check", action="store_true", help="check the lease and gateway without changing routes or restarting DHCP")
+    parser.add_argument("--wait-seconds", type=int, default=RENEW_WAIT, help="maximum time to wait for a usable lease")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true", help="check the lease and gateway without changing routes or restarting DHCP")
+    mode.add_argument("--ensure-oif-rule", type=int, metavar="PRIORITY", help="restore the output-interface policy rule only")
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", args.interface):
         parser.error("invalid interface name")
     if not 1 <= args.table <= 200:
         parser.error("table must be between 1 and 200")
+    if args.wait_seconds <= 0:
+        parser.error("--wait-seconds must be positive")
+    if args.ensure_oif_rule is not None and not 1 <= args.ensure_oif_rule <= 32765:
+        parser.error("policy-rule priority must be between 1 and 32765")
     if os.geteuid() != 0:
         parser.error("run as root on the VyOS host")
 
@@ -228,6 +262,9 @@ def main():
     try:
         if args.check:
             return maintain(args.interface, args.table, None, check_only=True)
+        if args.ensure_oif_rule is not None:
+            ensure_oif_rule(args.interface, args.table, args.ensure_oif_rule)
+            return 0
         STATE_DIR.mkdir(mode=0o700, exist_ok=True)
         with (STATE_DIR / f"table-{args.table}.state").open("a+") as state:
             try:
@@ -235,7 +272,7 @@ def main():
             except BlockingIOError:
                 return 0
             state.seek(0)
-            return maintain(args.interface, args.table, state)
+            return maintain(args.interface, args.table, state, wait_seconds=args.wait_seconds)
     except subprocess.CalledProcessError as exc:
         report(f"{exc.cmd[0]} exited with {exc.returncode}: {exc.stderr.strip()}", syslog.LOG_ERR)
     except (ImportError, OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:

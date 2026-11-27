@@ -2,7 +2,7 @@ import importlib.util
 import io
 import ipaddress
 from pathlib import Path
-from subprocess import CompletedProcess
+from subprocess import CompletedProcess, TimeoutExpired
 import sys
 from types import ModuleType
 from tempfile import TemporaryDirectory
@@ -28,7 +28,27 @@ class DhcpRouteTest(unittest.TestCase):
             CompletedProcess([], 1, "", 'Device "eth0.99" does not exist.'),
         ):
             with self.subTest(result=result), patch.object(route, "run", return_value=result):
-                self.assertEqual(route.interface_state(INTERFACE, allow_missing=True), (False, set()))
+                self.assertEqual(route.interface_state(INTERFACE), (False, set()))
+
+    def test_oif_rule_is_additive_and_idempotent(self):
+        for metadata in ("", ',"oif_detached":null'):
+            existing = CompletedProcess([], 0, '[{"priority":110,"src":"all","oif":"eth0.99","table":"101"' + metadata + "}]")
+            with self.subTest(metadata=metadata), patch.object(route, "run", return_value=existing) as run, patch.object(route, "report"):
+                route.ensure_oif_rule(INTERFACE, 101, 110)
+                run.assert_called_once_with("ip", "-N", "-j", "-4", "rule", "show")
+        with patch.object(route, "run", return_value=CompletedProcess([], 0, "[]")) as run, patch.object(route, "report"):
+            route.ensure_oif_rule(INTERFACE, 101, 110)
+            self.assertEqual(run.call_args_list, [
+                call("ip", "-N", "-j", "-4", "rule", "show"),
+                call("ip", "-4", "rule", "add", "pref", "110", "oif", INTERFACE, "lookup", "101"),
+            ])
+
+    def test_oif_rule_preserves_conflicting_priority(self):
+        existing = CompletedProcess([], 0, '[{"priority":110,"src":"all","fwmark":"0x65","table":"101"}]')
+        with patch.object(route, "run", return_value=existing) as run:
+            with self.assertRaisesRegex(RuntimeError, "already in use"):
+                route.ensure_oif_rule(INTERFACE, 101, 110)
+            run.assert_called_once()
 
     def test_lease_is_current_and_assigned(self):
         with TemporaryDirectory() as directory:
@@ -58,6 +78,15 @@ class DhcpRouteTest(unittest.TestCase):
                 call("arping", "-q", "-I", INTERFACE, "-s", "198.51.100.2", "-f", "-c", "2", "-w", "3",
                      "198.51.100.1", check=False),
             ])
+
+    def test_gateway_probe_tolerates_disappearing_interface(self):
+        with (
+            patch.object(route, "run", side_effect=[
+                CompletedProcess([], 1), CompletedProcess([], 2, "", "Interface not available"),
+            ]),
+            patch.object(route, "interface_state", return_value=(False, set())),
+        ):
+            self.assertIsNone(route.gateway_replies(INTERFACE, NEW))
 
     def test_arp_reply_is_accepted_without_restarting_dhcp(self):
         with (
@@ -125,15 +154,17 @@ class DhcpRouteTest(unittest.TestCase):
                 route.configure_routes(101, INTERFACE, NEW)
             commit.assert_not_called()
 
-    def test_failed_gateway_is_reprobed_after_restart(self):
+    def test_recovery_continues_if_renew_command_times_out(self):
+        old_addresses = {("192.0.2.2", 24)}
         with (
             patch.object(
-                route, "interface_state", side_effect=[(True, {("192.0.2.2", 24)}), (False, set()), (True, set()), (True, set())]
+                route, "interface_state",
+                side_effect=[(True, old_addresses), (True, old_addresses), (False, set()), (True, set()), (True, set())],
             ),
-            patch.object(route, "read_lease", side_effect=[(OLD, None), (NEW, None), (NEW, None)]),
+            patch.object(route, "read_lease", side_effect=[(OLD, None), (OLD, None), (NEW, None), (NEW, None)]),
             patch.object(route, "gateway_replies", side_effect=[None, "ICMP"]),
             patch.object(route, "configure_routes") as configure,
-            patch.object(route, "run") as run,
+            patch.object(route, "run", side_effect=TimeoutExpired(route.DHCP_RENEW, 30)) as run,
             patch.object(route, "report"),
             patch.object(route.time, "monotonic", return_value=500),
             patch.object(route.time, "sleep"),
@@ -150,14 +181,16 @@ class DhcpRouteTest(unittest.TestCase):
             patch.object(route, "read_lease", side_effect=[(None, "lease missing"), (NEW, None), (NEW, None)]),
             patch.object(route, "gateway_replies", return_value="ICMP"),
             patch.object(route, "configure_routes") as configure,
-            patch.object(route, "run", return_value=CompletedProcess([], 0)) as run,
+            patch.object(route, "run", return_value=CompletedProcess([], 0, "activating\n")) as run,
             patch.object(route, "report"),
             patch.object(route.time, "monotonic", return_value=500),
             patch.object(route.time, "sleep"),
         ):
             self.assertEqual(route.maintain(INTERFACE, 101, io.StringIO()), 0)
             self.assertEqual(configure.call_args_list, [call(101, INTERFACE, None), call(101, INTERFACE, NEW)])
-            run.assert_called_once_with("systemctl", "is-active", "--quiet", "dhclient@eth0.99.service", check=False)
+            run.assert_called_once_with(
+                "systemctl", "show", "--property=ActiveState", "--value", "dhclient@eth0.99.service", check=False
+            )
 
     def test_cooldown_prevents_repeated_restart(self):
         with (
@@ -171,16 +204,20 @@ class DhcpRouteTest(unittest.TestCase):
             self.assertEqual(route.maintain(INTERFACE, 101, io.StringIO("400")), 1)
             run.assert_not_called()
 
-    def test_lease_change_during_probe_withdraws_stale_route(self):
+    def test_lease_change_during_probe_waits_for_new_gateway(self):
         with (
             patch.object(route, "interface_state", return_value=(True, set())),
-            patch.object(route, "read_lease", side_effect=[(OLD, None), (NEW, None)]),
-            patch.object(route, "gateway_replies", return_value="ICMP"),
+            patch.object(route, "read_lease", side_effect=[(OLD, None), (NEW, None), (NEW, None), (NEW, None)]),
+            patch.object(route, "gateway_replies", side_effect=[None, "ARP"]),
             patch.object(route, "configure_routes") as configure,
+            patch.object(route, "run") as run,
             patch.object(route, "report"),
+            patch.object(route.time, "monotonic", return_value=500),
+            patch.object(route.time, "sleep"),
         ):
-            self.assertEqual(route.maintain(INTERFACE, 101, io.StringIO()), 1)
-            configure.assert_called_once_with(101, INTERFACE, None)
+            self.assertEqual(route.maintain(INTERFACE, 101, io.StringIO()), 0)
+            self.assertEqual(configure.call_args_list, [call(101, INTERFACE, None), call(101, INTERFACE, NEW)])
+            run.assert_not_called()
 
 
 if __name__ == "__main__":

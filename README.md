@@ -46,6 +46,8 @@ set policy local-route rule 103 set table '103'
 
 如果 `dhcp-interface` 换租后仍指向旧网关，可在抓取前运行 VyOS 宿主机脚本 [vyos-dhcp-route.py](scripts/vyos-dhcp-route.py)。脚本核对接口 IPv4 地址和当前租约，用 ping 或 ARP 验证租约网关，再通过 VyOS 原生配置会话提交表 101 的默认路由。网关未就绪时，表 101 会保留拒绝路由。若 DHCP 客户端正在等待地址，脚本让它继续尝试。需要续租时，脚本调用 VyOS 的 DHCP 操作命令，随后最多等待八分钟。自动提交只写入运行配置，每天由抓取前的任务重新确认网关。
 
+接口在续租中暂时消失、地址在探测中变化，或续租命令自身超时时，脚本会继续等待可用租约。白天手动排障时，可用 `--wait-seconds 900` 延长单次等待到 15 分钟。
+
 将脚本复制到 VyOS 后，在操作模式下安装并预检。默认处理 `eth0.99` 和表 `101`，预检只读取状态并探测。如果预检失败，输出会说明是接口状态、租约与地址不匹配、租约网关缺失，还是 ICMP 和 ARP 都无响应。通过 ARP 预检后，仍可用一次电信抓取验证网关转发和鉴权。
 
 ```bash
@@ -76,6 +78,24 @@ sudo journalctl -t hbiptv-dhcp-route -n 20
 ```
 
 正常时表 101 中应有指向当前 DHCP 网关的默认路由。若脚本报告 `unmanaged default route`，请先核对 VyOS 运行配置里的表 101 默认路由。最后进入容器运行 `python -m iptv_epg once --provider telecom`，检查本地节目单是否更新。白天需要手动抓取电信时，也可以先手动运行一次这个准备脚本。
+
+### 开机恢复 rtp2httpd 电信回看规则
+
+如果 rtp2httpd 使用宿主机网络，并设置 `upstream-interface-rtsp = eth0.99`，可通过 Linux 的 `oif eth0.99 lookup 101` 规则为这些已绑定接口的本机连接选表。先确认优先级 110 可用，或已经是这条规则，然后运行：
+
+```bash
+sudo /config/scripts/hbiptv-dhcp-route.py --ensure-oif-rule 110
+```
+
+在现有的 `/config/scripts/vyos-postconfig-bootup.script` 末尾追加以下内容。如果文件已有 `exit`，插在它前面，并保留其他启动命令。第一条命令在开机后恢复规则，第二条安排一次路由准备，给 DHCP 服务留出启动时间。
+
+```bash
+if /config/scripts/hbiptv-dhcp-route.py --ensure-oif-rule 110; then
+    systemd-run --quiet --collect --unit=hbiptv-telecom-boot --on-active=15s /config/scripts/hbiptv-dhcp-route.py
+fi
+```
+
+确认启动脚本有执行权限。正常运行时可用 `ip -4 rule show` 核对 110 号规则，并用 `ip -4 route show table 101` 核对当前网关。若白天更换了电信租约，可手动执行一次 `sudo /config/scripts/hbiptv-dhcp-route.py` 刷新表 101。
 
 ## 本地产物
 
