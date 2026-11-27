@@ -26,6 +26,14 @@ class DhcpRouteTest(unittest.TestCase):
         with patch.object(route, "run", return_value=missing):
             self.assertEqual(route.table_defaults(101), [])
 
+    def test_missing_interface_can_be_transient(self):
+        for result in (
+            CompletedProcess([], 0, "[]", ""),
+            CompletedProcess([], 1, "", 'Device "eth0.99" does not exist.'),
+        ):
+            with self.subTest(result=result), patch.object(route, "run", return_value=result):
+                self.assertEqual(route.interface_state(INTERFACE, allow_missing=True), (False, set()))
+
     def test_lease_is_current_and_assigned(self):
         with TemporaryDirectory() as directory:
             lease_file = Path(directory) / "dhclient_eth0.99.lease"
@@ -109,9 +117,11 @@ class DhcpRouteTest(unittest.TestCase):
 
     def test_failed_gateway_is_reprobed_after_restart(self):
         with (
-            patch.object(route, "interface_state", return_value=(True, set())),
+            patch.object(
+                route, "interface_state", side_effect=[(True, set()), (False, set()), (True, set()), (True, set())]
+            ),
             patch.object(route, "read_lease", side_effect=[(OLD, None), (NEW, None), (NEW, None)]),
-            patch.object(route, "lease_mtime", side_effect=[100, 200, 200]),
+            patch.object(route, "lease_mtime", side_effect=[100, 200, 200, 200]),
             patch.object(route, "gateway_replies", side_effect=[None, "ICMP"]),
             patch.object(route, "configure_routes") as configure,
             patch.object(route, "run") as run,

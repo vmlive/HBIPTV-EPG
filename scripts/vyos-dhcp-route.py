@@ -19,7 +19,7 @@ PROTOCOL = 242
 DEFAULT_METRIC = 100
 REJECT_METRIC = 32760
 RENEW_COOLDOWN = 300
-RENEW_WAIT = 25
+RENEW_WAIT = 45
 
 
 @dataclass(frozen=True)
@@ -76,9 +76,16 @@ def read_lease(path, interface, addresses, now):
     return None, f"DHCP routers {advertised} are not usable in {address.network}"
 
 
-def interface_state(interface):
-    links = json.loads(run("ip", "-j", "-4", "addr", "show", "dev", interface).stdout)
+def interface_state(interface, *, allow_missing=False):
+    result = run("ip", "-j", "-4", "addr", "show", "dev", interface, check=False)
+    if result.returncode:
+        if allow_missing and ("does not exist" in result.stderr or "Cannot find device" in result.stderr):
+            return False, set()
+        result.check_returncode()
+    links = json.loads(result.stdout)
     if not links:
+        if allow_missing:
+            return False, set()
         raise RuntimeError(f"{interface}: interface missing")
     link = links[0]
     flags = set(link.get("flags", []))
@@ -152,7 +159,7 @@ def maintain(interface, table, state, *, check_only=False):
     probe = gateway_replies(interface, lease) if lease else None
     if probe:
         # The interface or lease can change while ping is in progress.
-        ready, addresses = interface_state(interface)
+        ready, addresses = interface_state(interface, allow_missing=True)
         validated = read_lease(path, interface, addresses, time.time())[0] if ready else None
         if validated != lease:
             if not check_only:
@@ -195,10 +202,10 @@ def maintain(interface, table, state, *, check_only=False):
         time.sleep(2)
         if (new_mtime := lease_mtime(path)) is None or new_mtime == mtime:
             continue
-        ready, addresses = interface_state(interface)
+        ready, addresses = interface_state(interface, allow_missing=True)
         lease, _ = read_lease(path, interface, addresses, time.time()) if ready else (None, None)
         if lease and gateway_replies(interface, lease) and lease_mtime(path) == new_mtime:
-            ready, addresses = interface_state(interface)
+            ready, addresses = interface_state(interface, allow_missing=True)
             if ready and read_lease(path, interface, addresses, time.time())[0] == lease:
                 configure_routes(table, interface, lease)
                 return 0
