@@ -44,17 +44,40 @@ class DhcpRouteTest(unittest.TestCase):
             lease_file.write_text(lease_file.read_text().replace("'RENEW'", "'TIMEOUT'"))
             self.assertEqual(route.read_lease(lease_file, INTERFACE, {("198.51.100.2", 24)}, 100), (NEW, None))
 
-    def test_check_prints_ping_failure_without_restarting_dhcp_or_changing_routes(self):
+    def test_gateway_replies_to_arp_after_ping_fails(self):
+        with patch.object(
+            route, "run", side_effect=[CompletedProcess([], 1), CompletedProcess([], 0)]
+        ) as run:
+            self.assertEqual(route.gateway_replies(INTERFACE, NEW), "ARP")
+            run.assert_has_calls([
+                call("ping", "-4", "-n", "-I", INTERFACE, "-c", "2", "-W", "1", "198.51.100.1", check=False),
+                call("arping", "-q", "-I", INTERFACE, "-s", "198.51.100.2", "-f", "-c", "2", "-w", "3",
+                     "198.51.100.1", check=False),
+            ])
+
+    def test_arp_reply_is_accepted_without_restarting_dhcp(self):
         with (
             patch.object(route, "interface_state", return_value=(True, set())),
             patch.object(route, "read_lease", return_value=(NEW, None)),
-            patch.object(route, "gateway_replies", return_value=False),
+            patch.object(route, "gateway_replies", return_value="ARP"),
+            patch.object(route, "configure_routes") as configure,
+            patch.object(route, "run") as run,
+        ):
+            self.assertEqual(route.maintain(INTERFACE, 101, io.StringIO()), 0)
+            configure.assert_called_once_with(101, INTERFACE, NEW)
+            run.assert_not_called()
+
+    def test_check_prints_probe_failure_without_restarting_dhcp_or_changing_routes(self):
+        with (
+            patch.object(route, "interface_state", return_value=(True, set())),
+            patch.object(route, "read_lease", return_value=(NEW, None)),
+            patch.object(route, "gateway_replies", return_value=None),
             patch.object(route, "configure_routes") as configure,
             patch.object(route, "run") as run,
             patch.object(route, "report") as report,
         ):
             self.assertEqual(route.maintain(INTERFACE, 101, None, check_only=True), 1)
-            self.assertIn("198.51.100.1 did not reply to ping", report.call_args.args[0])
+            self.assertIn("198.51.100.1 did not reply to ICMP or ARP", report.call_args.args[0])
             configure.assert_not_called()
             run.assert_not_called()
 
@@ -89,7 +112,7 @@ class DhcpRouteTest(unittest.TestCase):
             patch.object(route, "interface_state", return_value=(True, set())),
             patch.object(route, "read_lease", side_effect=[(OLD, None), (NEW, None), (NEW, None)]),
             patch.object(route, "lease_mtime", side_effect=[100, 200, 200]),
-            patch.object(route, "gateway_replies", side_effect=[False, True]),
+            patch.object(route, "gateway_replies", side_effect=[None, "ICMP"]),
             patch.object(route, "configure_routes") as configure,
             patch.object(route, "run") as run,
             patch.object(route, "report"),
@@ -118,7 +141,7 @@ class DhcpRouteTest(unittest.TestCase):
         with (
             patch.object(route, "interface_state", return_value=(True, set())),
             patch.object(route, "read_lease", side_effect=[(OLD, None), (NEW, None)]),
-            patch.object(route, "gateway_replies", return_value=True),
+            patch.object(route, "gateway_replies", return_value="ICMP"),
             patch.object(route, "configure_routes") as configure,
             patch.object(route, "report"),
         ):

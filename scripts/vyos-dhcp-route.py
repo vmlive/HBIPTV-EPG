@@ -88,9 +88,16 @@ def interface_state(interface):
 
 def gateway_replies(interface, lease):
     result = run("ping", "-4", "-n", "-I", interface, "-c", "2", "-W", "1", str(lease.gateway), check=False)
-    if result.returncode == 2:
-        raise RuntimeError(f"{interface}: ping could not run: {result.stderr.strip()}")
-    return result.returncode == 0
+    if result.returncode == 0:
+        return "ICMP"
+    # An on-link router can respond to ARP without accepting ICMP echo requests.
+    result = run(
+        "arping", "-q", "-I", interface, "-s", str(lease.address.ip), "-f", "-c", "2", "-w", "3",
+        str(lease.gateway), check=False,
+    )
+    if result.returncode not in (0, 1):
+        raise RuntimeError(f"{interface}: ARP probe failed: {result.stderr.strip()}")
+    return "ARP" if result.returncode == 0 else None
 
 
 def table_defaults(table):
@@ -142,10 +149,8 @@ def maintain(interface, table, state, *, check_only=False):
     path = LEASE_DIR / f"dhclient_{interface}.lease"
     ready, addresses = interface_state(interface)
     lease, problem = read_lease(path, interface, addresses, time.time()) if ready else (None, "link down, waiting for carrier")
-    if lease and not gateway_replies(interface, lease):
-        problem = f"DHCP gateway {lease.gateway} did not reply to ping (lease address {lease.address})"
-        lease = None
-    if lease:
+    probe = gateway_replies(interface, lease) if lease else None
+    if probe:
         # The interface or lease can change while ping is in progress.
         ready, addresses = interface_state(interface)
         validated = read_lease(path, interface, addresses, time.time())[0] if ready else None
@@ -155,11 +160,13 @@ def maintain(interface, table, state, *, check_only=False):
             report(f"{interface}: DHCP changed during the gateway probe, retry on the next run")
             return 1
         if check_only:
-            report(f"{interface}: {lease.address}, DHCP gateway {lease.gateway} replied")
+            report(f"{interface}: {lease.address}, DHCP gateway {lease.gateway} replied to {probe}")
         else:
             configure_routes(table, interface, lease)
         return 0
 
+    if lease:
+        problem = f"DHCP gateway {lease.gateway} did not reply to ICMP or ARP (lease address {lease.address})"
     if check_only:
         report(f"{interface}: {problem}", syslog.LOG_WARNING)
         return 1
