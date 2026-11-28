@@ -101,7 +101,16 @@ function updateJob() {
   if (!job) message("job-status", "当前没有手动任务");
   else if (job.state === "running") message("job-status", labels[job.action] + " 正在抓取…");
   else if (job.state === "error") message("job-status", labels[job.action] + " 失败。 " + job.message, true);
-  else message("job-status", labels[job.action] + " 已完成，共 " + job.count + " " + units[job.action] + "。");
+  else {
+    let status = labels[job.action] + " 已完成，共 " + job.count + " " + units[job.action] + "。";
+    if (job.file) {
+      const updated = new Date(job.file.mtime * 1000).toLocaleString("zh-CN", {
+        timeZone: "Asia/Shanghai", hour12: false,
+      });
+      status += " 已写入 " + job.file.path + "，更新于 " + updated + "（北京时间）。";
+    }
+    message("job-status", status);
+  }
 }
 
 async function switchProvider(name, label) {

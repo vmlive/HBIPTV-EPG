@@ -2,6 +2,7 @@ from contextlib import contextmanager
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import socket
 from tempfile import TemporaryDirectory
@@ -142,7 +143,11 @@ class WebTest(unittest.TestCase):
                 selection = {"101": {"enabled": True, "catchup": False},
                              "103": {"enabled": False, "catchup": True}}
                 self.assertEqual(self.request("POST", "/api/channels?name=telecom", selection)[0], 200)
-                self.assertEqual(self.get_job("playlist")["count"], 2)
+                os.utime(path, (1, 1))
+                job = self.get_job("playlist")
+                self.assertEqual(job["count"], 2)
+                self.assertEqual(job["file"], {"path": str(path), "mtime": path.stat().st_mtime})
+                self.assertGreater(job["file"]["mtime"], 1)
                 playlist = path.read_text()
                 self.assertIn('x-tvg-url="https://example.test/epg/telecom/PL.xml.gz"', playlist)
                 self.assertIn('tvg-id="101"', playlist)

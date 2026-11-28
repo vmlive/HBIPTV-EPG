@@ -170,6 +170,7 @@ def catalog_path(data_dir, name):
 def collect(name, config, data_dir, *, outputs=("epg", "playlist"), wait=False):
     module, label = PROVIDERS[name]
     interface, fwmark, auth = provider_config(config, name)
+    output = data_dir / name
     with provider_lock(data_dir, name, wait=wait):
         with tempfile.TemporaryDirectory(prefix=f".{name}-", dir=data_dir) as temp:
             stage = Path(temp)
@@ -199,9 +200,10 @@ def collect(name, config, data_dir, *, outputs=("epg", "playlist"), wait=False):
                 base_url = config.get("playlist_base_url")
                 prefix = f"{base_url}/{name}/" if base_url else ""
                 selection = config["providers"][name].get("channels", {})
-                result["playlist"] = write_playlist(stage / "rtp2http.m3u", channels, label, prefix, selection)
+                playlist = stage / "rtp2http.m3u"
+                result["playlist"] = write_playlist(playlist, channels, label, prefix, selection)
             if outputs:
-                save_local(stage, data_dir / name)
+                save_local(stage, output)
             catalog = {
                 channel["userchannel_id"]: {
                     "id": channel["userchannel_id"],
@@ -216,7 +218,9 @@ def collect(name, config, data_dir, *, outputs=("epg", "playlist"), wait=False):
             if "epg" in result:
                 logger.info("%s 已生成 %s 个频道和 %s 条节目", name, len(channels), result["epg"])
             if "playlist" in result:
-                logger.info("%s 已生成 %s 个频道的播放列表", name, result["playlist"])
+                destination = (output / playlist.name).resolve()
+                result["playlist_file"] = {"path": str(destination), "mtime": destination.stat().st_mtime}
+                logger.info("%s 已生成 %s 个频道的播放列表，写入 %s", name, result["playlist"], destination)
             if "logos" in result:
                 logger.info("%s 已更新 %s 张 Logo", name, result["logos"])
             return result

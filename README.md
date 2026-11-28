@@ -101,7 +101,14 @@ fi
 
 ## 本地产物
 
-每家运营商写入单独的目录。以电信为例，容器内的文件是 `/data/telecom/PL.xml`、`PL.xml.gz`、`rtp2http.m3u` 和 `logo/*.png`。下面的部署示例会把这些文件分别保存到 VyOS 的 `/config/hbiptv-epg/data/` 或 Compose 项目的 `./data/`。
+每家运营商写入单独的目录。以电信为例，容器内的文件是 `/data/telecom/PL.xml`、`PL.xml.gz`、`rtp2http.m3u` 和 `logo/*.png`。下面的部署示例会把这些文件分别保存到 VyOS 的 `/config/user-data/docker/hbiptv-epg/data/` 或 Compose 项目的 `./data/`。
+
+网页生成 M3U 后会显示容器内的文件路径和修改时间。若 VyOS 上检查的文件时间较早，可用下列命令核对 `/data` 实际挂载的宿主机目录，并查看容器内对应文件。
+
+```bash
+sudo podman inspect --format '{{range .Mounts}}{{println .Destination .Source}}{{end}}' hbiptv-epg
+sudo podman exec hbiptv-epg stat /data/cmcc/rtp2http.m3u
+```
 
 M3U 默认使用相对于同一目录的节目单和 Logo 路径。如果你的脚本会把整个数据目录发布到 HTTP(S) 服务，可将 `playlist_base_url` 设为该目录的网址，例如 `https://example.org/iptv`。生成的电信节目单链接将是 `https://example.org/iptv/telecom/PL.xml.gz`。该选项只改变 M3U 中的链接。
 
@@ -112,8 +119,8 @@ M3U 默认使用相对于同一目录的节目单和 Logo 路径。如果你的�
 将已准备的 `config.local.json` 复制到 VyOS，然后在操作模式下安装到持久化的 `/config`。如果文件放在其他目录，请替换下面命令中的源路径。
 
 ```bash
-sudo install -d -m 0700 /config/hbiptv-epg /config/hbiptv-epg/data
-sudo install -m 0600 config.local.json /config/hbiptv-epg/config.json
+sudo install -d -m 0700 /config/user-data/docker/hbiptv-epg /config/user-data/docker/hbiptv-epg/data
+sudo install -m 0600 config.local.json /config/user-data/docker/hbiptv-epg/config.json
 ```
 
 把下面的 `YOUR_DOCKERHUB_USER` 替换为实际发布镜像的 Docker Hub 用户名。先拉取镜像，再进入配置模式。镜像默认启动定时任务。
@@ -126,10 +133,10 @@ set container name hbiptv-epg allow-host-networks
 set container name hbiptv-epg capability 'net-raw'
 set container name hbiptv-epg restart 'always'
 set container name hbiptv-epg environment EPG_RUN_AT value '04:00'
-set container name hbiptv-epg volume config source '/config/hbiptv-epg/config.json'
+set container name hbiptv-epg volume config source '/config/user-data/docker/hbiptv-epg/config.json'
 set container name hbiptv-epg volume config destination '/run/iptv/config.json'
 set container name hbiptv-epg volume config mode 'ro'
-set container name hbiptv-epg volume data source '/config/hbiptv-epg/data'
+set container name hbiptv-epg volume data source '/config/user-data/docker/hbiptv-epg/data'
 set container name hbiptv-epg volume data destination '/data'
 set container name hbiptv-epg volume data mode 'rw'
 commit
@@ -139,11 +146,11 @@ show container
 show container log hbiptv-epg
 ```
 
-在操作模式下运行 `connect container hbiptv-epg` 进入容器。执行 `python -m iptv_epg once` 立即抓取，用 `exit` 返回 VyOS 后检查宿主机 `/config/hbiptv-epg/data/` 中的产物。定时任务默认每天北京时间 04:00 执行。
+在操作模式下运行 `connect container hbiptv-epg` 进入容器。执行 `python -m iptv_epg once` 立即抓取，用 `exit` 返回 VyOS 后检查宿主机 `/config/user-data/docker/hbiptv-epg/data/` 中的产物。定时任务默认每天北京时间 04:00 执行。
 
 ### 单独验证联通和更新 Logo
 
-进入容器后运行 `python -m iptv_epg once --provider unicom`。成功后检查宿主机的 `/config/hbiptv-epg/data/unicom/PL.xml.gz` 和 `rtp2http.m3u`。如果联通仍使用 `wg1`，可在 VyOS 操作模式下用 `sudo wg show wg1 allowed-ips` 核对联通服务地址是否由 `Unicom_XFC` 覆盖。
+进入容器后运行 `python -m iptv_epg once --provider unicom`。成功后检查宿主机的 `/config/user-data/docker/hbiptv-epg/data/unicom/PL.xml.gz` 和 `rtp2http.m3u`。如果联通仍使用 `wg1`，可在 VyOS 操作模式下用 `sudo wg show wg1 allowed-ips` 核对联通服务地址是否由 `Unicom_XFC` 覆盖。
 
 手动更新联通 Logo 用 `python -m iptv_epg logos --provider unicom`。把运营商换为 `telecom` 或 `cmcc` 可更新另一家，省略 `--provider` 会更新所有已启用运营商。Logo 命令只写各自的 `logo/`，定时任务与 `once` 会保留已有图片。
 

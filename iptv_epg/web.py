@@ -196,6 +196,8 @@ class Console:
             self.data_dir.mkdir(parents=True, exist_ok=True)
             result = collect(name, config, self.data_dir, outputs=ACTIONS[action])
             job.update(state="done", count=result[action])
+            if action == "playlist":
+                job["file"] = result["playlist_file"]
         except RuntimeError as exc:
             job.update(state="error", message=str(exc))
             logger.warning("%s %s 手动任务失败。%s", name, action, exc)
