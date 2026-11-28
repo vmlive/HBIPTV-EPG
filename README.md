@@ -213,7 +213,15 @@ docker compose logs -f epg
 
 第一次执行后可在 `data/` 核对产物。也可加 `--provider telecom`、`--provider cmcc` 或 `--provider unicom` 单独调试。定时服务默认每天北京时间 04:00 运行，可在 `.env` 设置 `EPG_RUN_AT=03:30` 后重新执行 `docker compose up -d epg`。个别运营商失败时，其他运营商仍会运行。空节目单不会覆盖上一版。
 
-如需 Web 管理，把现有配置放入 `config/config.json`，启用其中的 `web`，将 `compose.yaml` 的配置挂载改为 `./config:/run/iptv:rw`。保留数据挂载 `./data:/data`，然后重建服务容器。
+如需 Web 管理，将配置安装到 `config/config.json` 并启用其中的 `web`。默认 Compose 容器以 root 运行且仅保留 `NET_RAW`，所以目录和文件都要对容器用户可写。
+
+```bash
+sudo install -d -m 0700 config
+sudo install -m 0600 config.local.json config/config.json
+sudoedit config/config.json
+```
+
+将 `compose.yaml` 中指向 `/run/iptv/config.json` 的文件挂载替换为 `./config:/run/iptv:rw`，然后重建服务容器。
 
 如果构建主机使用带自定义 CA 的出口代理，可使用宿主机已信任的 CA 构建：
 
