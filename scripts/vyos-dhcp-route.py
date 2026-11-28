@@ -3,6 +3,7 @@
 import argparse
 from dataclasses import dataclass
 import fcntl
+import grp
 import ipaddress
 import json
 import os
@@ -138,6 +139,15 @@ def active_config(path):
 
 def commit_default(path, current, interface, gateway):
     from vyos.configsession import ConfigSession, ConfigSessionError
+
+    # Match the VyOS boot config loader before creating a native config session.
+    # Commits can recreate shared config directories using the process GID and umask.
+    try:
+        config_group = grp.getgrnam("vyattacfg")
+    except KeyError:
+        raise RuntimeError("VyOS configuration group vyattacfg is missing") from None
+    os.setgid(config_group.gr_gid)
+    os.umask(0o002)
 
     try:
         session = ConfigSession(os.getpid(), app="hbiptv-dhcp-route")

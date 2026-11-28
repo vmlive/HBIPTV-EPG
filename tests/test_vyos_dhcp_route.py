@@ -4,7 +4,7 @@ import ipaddress
 from pathlib import Path
 from subprocess import CompletedProcess, TimeoutExpired
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, call, patch
@@ -119,14 +119,26 @@ class DhcpRouteTest(unittest.TestCase):
         old_default = {"description": route.ROUTE_DESCRIPTION, "next-hop": {str(OLD.gateway): {"interface": INTERFACE}}}
         session = Mock()
         api = ModuleType("vyos.configsession")
-        api.ConfigSession = Mock(return_value=session)
+        operations = Mock()
+        api.ConfigSession = operations.ConfigSession
+        api.ConfigSession.return_value = session
         api.ConfigSessionError = RuntimeError
+        operations.getgrnam.return_value = SimpleNamespace(gr_gid=123)
         with (
+            patch.object(route.grp, "getgrnam", operations.getgrnam),
+            patch.object(route.os, "setgid", operations.setgid),
+            patch.object(route.os, "umask", operations.umask),
             patch.dict(sys.modules, {"vyos.configsession": api}),
             patch.object(route, "active_config", return_value=old_default),
             patch.object(route, "report"),
         ):
             route.configure_routes(101, INTERFACE, NEW)
+        self.assertEqual(operations.mock_calls[:4], [
+            call.getgrnam("vyattacfg"),
+            call.setgid(123),
+            call.umask(0o002),
+            call.ConfigSession(route.os.getpid(), app="hbiptv-dhcp-route"),
+        ])
         self.assertEqual(session.mock_calls, [
             call.delete(path),
             call.set([*path, "description"], route.ROUTE_DESCRIPTION),
@@ -134,6 +146,19 @@ class DhcpRouteTest(unittest.TestCase):
             call.set([*path, "next-hop", str(NEW.gateway), "interface"], INTERFACE),
             call.commit(),
         ])
+
+    def test_missing_config_group_prevents_opening_a_session(self):
+        api = ModuleType("vyos.configsession")
+        api.ConfigSession = Mock()
+        api.ConfigSessionError = RuntimeError
+        with (
+            patch.dict(sys.modules, {"vyos.configsession": api}),
+            patch.object(route.grp, "getgrnam", side_effect=KeyError("vyattacfg")),
+            patch.object(route, "active_config", return_value={}),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "configuration group vyattacfg is missing"):
+                route.configure_routes(101, INTERFACE, NEW)
+        api.ConfigSession.assert_not_called()
 
     def test_unchanged_default_skips_commit(self):
         current = {

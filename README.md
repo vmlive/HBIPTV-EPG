@@ -48,6 +48,8 @@ set policy local-route rule 103 set table '103'
 
 接口在续租中暂时消失、地址在探测中变化，或续租命令自身超时时，脚本会继续等待可用租约。白天手动排障时，可用 `--wait-seconds 900` 延长单次等待到 15 分钟。
 
+路由提交沿用 VyOS 启动加载器的权限设置。脚本在创建配置会话前切换主组为 `vyattacfg`，并设置 `umask 0002`，使提交生成的目录可由该组写入。这也适用于由 cron 或开机 `systemd-run` 启动的任务。升级时请替换 `/config/scripts/hbiptv-dhcp-route.py`。如果旧版运行后已出现 `Set failed` 或 `Delete failed`，可用 `sudo stat -c '%A %U:%G %n' /opt/vyatta/config/active/protocols` 检查。确认 `/config/config.boot` 包含要保留的配置后，可在维护窗口重启，由 VyOS 重新加载已保存的配置并建立配置树。重启会丢弃未保存的更改。
+
 将脚本复制到 VyOS 后，在操作模式下安装并预检。默认处理 `eth0.99` 和表 `101`，预检只读取状态并探测。如果预检失败，输出会说明是接口状态、租约与地址不匹配、租约网关缺失，还是 ICMP 和 ARP 都无响应。通过 ARP 预检后，仍可用一次电信抓取验证网关转发和鉴权。
 
 ```bash
