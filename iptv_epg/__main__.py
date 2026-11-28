@@ -29,20 +29,30 @@ def parse_run_at(value):
 def start_web(config_path, data_dir):
     try:
         settings = load_config(config_path).get("web", {})
+    except FileNotFoundError:
+        logger.warning("管理界面未启动。未找到配置文件 %s，请检查容器挂载", config_path)
+        return
+    except OSError as exc:
+        logger.error("管理界面未启动。无法读取 %s（%s）", config_path, exc.strerror or type(exc).__name__)
+        return
+    except (ValueError, RuntimeError) as exc:
+        logger.error("管理界面未启动。%s 配置有误。%s", config_path, exc)
+        return
+
+    try:
         if not isinstance(settings, dict) or type(settings.get("enabled", False)) is not bool:
             raise ValueError("web.enabled 必须为布尔值")
         if not settings.get("enabled", False):
+            logger.info("管理界面未启用。%s 中的 web.enabled 未设为 true", config_path)
             return
         from .web import create_web_server
 
         server = create_web_server(config_path, data_dir, settings)
-    except FileNotFoundError:
-        return
     except (ValueError, RuntimeError) as exc:
         logger.error("管理界面启动失败。%s", exc)
         return
     except OSError as exc:
-        logger.error("管理界面启动失败（%s）", type(exc).__name__)
+        logger.error("管理界面监听失败。%s，请检查 web.bind 和 web.port", exc.strerror or type(exc).__name__)
         return
 
     Thread(target=server.serve_forever, daemon=True).start()

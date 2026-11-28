@@ -188,6 +188,17 @@ exit
 
 默认监听回环地址。从电脑通过 SSH 转发访问，例如 `ssh -N -L 8090:127.0.0.1:8090 vyos@192.168.15.1`，然后在浏览器打开 `http://127.0.0.1:8090`。如果需要在局域网直连，可以将 `web.bind` 设为 VyOS 的 LAN 地址并将端口访问限制到管理网段。通过 HTTPS 反向代理时可设置 `web.secure_cookie: true`。
 
+更新已有容器的镜像后，在 VyOS 操作模式下执行 `restart container hbiptv-epg`，让运行实例使用拉取后的镜像并重新读取配置。单独编辑宿主机配置文件时，也使用该命令重新读取 Web 设置。
+
+用以下命令检查默认回环监听，按配置替换探测地址和端口。
+
+```bash
+sudo podman logs --tail 30 hbiptv-epg
+curl --noproxy '*' -sS --max-time 4 -o /dev/null -w 'HTTP %{http_code}\n' http://127.0.0.1:8090/
+```
+
+日志出现 `管理界面监听 127.0.0.1:8090`、本机请求返回 `HTTP 200` 时，可通过 SSH 转发访问。出现配置文件缺失时，检查容器内路径 `/run/iptv/config.json`。出现 `web.enabled` 未启用时，检查该键是否位于 `config.json` 顶层 `web` 对象中，且值为 JSON 布尔值 `true`。如果 `web.bind` 指向局域网地址，请在 VyOS 上用该地址进行探测。
+
 ### 在页面中操作
 
 1. 选择电信、移动或联通，设置接口、fwmark 和运营商的鉴权字段。鉴权密码字段留空会保留已存密码。EPG 和 Logo 发布地址应用于三家运营商的 M3U。

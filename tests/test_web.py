@@ -9,6 +9,7 @@ from threading import Thread
 import time
 import unittest
 
+from iptv_epg.__main__ import start_web
 from iptv_epg.service import PROVIDERS
 from iptv_epg.web import create_web_server
 from smoke import IPTVFixture
@@ -27,6 +28,29 @@ def running(server):
 
 
 class WebTest(unittest.TestCase):
+    def test_scheduler_reports_missing_config_disabled_web_and_occupied_port(self):
+        with TemporaryDirectory() as directory, socket.socket() as occupied:
+            data = Path(directory)
+            config = data / "config.json"
+            with self.assertLogs("iptv_epg", level="WARNING") as logs:
+                start_web(config, data)
+            self.assertIn(f"未找到配置文件 {config}", logs.output[0])
+
+            config.write_text('{"providers": {}}', encoding="utf-8")
+            with self.assertLogs("iptv_epg", level="INFO") as logs:
+                start_web(config, data)
+            self.assertIn("web.enabled", logs.output[0])
+
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen()
+            config.write_text(json.dumps({"providers": {}, "web": {
+                "enabled": True, "port": occupied.getsockname()[1], "password": "fixture-password",
+            }}), encoding="utf-8")
+            with self.assertLogs("iptv_epg", level="ERROR") as logs:
+                start_web(config, data)
+            self.assertIn("管理界面监听失败", logs.output[0])
+            self.assertIn("web.bind 和 web.port", logs.output[0])
+
     def request(self, method, path, data=None, *, csrf=True):
         connection = HTTPConnection("127.0.0.1", self.port, timeout=5)
         headers = {}
