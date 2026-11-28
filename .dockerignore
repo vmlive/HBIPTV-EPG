@@ -3,3 +3,5 @@
 !requirements.txt
 !iptv_epg/
 !iptv_epg/*.py
+!iptv_epg/web_assets/
+!iptv_epg/web_assets/*

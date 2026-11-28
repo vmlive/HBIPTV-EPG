@@ -145,6 +145,55 @@ show container log hbiptv-epg
 
 手动更新联通 Logo 用 `python -m iptv_epg logos --provider unicom`。把运营商换为 `telecom` 或 `cmcc` 可更新另一家，省略 `--provider` 会更新所有已启用运营商。Logo 命令只写各自的 `logo/`，定时任务与 `once` 会保留已有图片。
 
+## 本地 Web 管理
+
+在现有 `config.json` 顶层添加 `web`。容器以默认的 `schedule` 模式启动时会读取这些设置。首次启用或调整监听地址后需要重启容器。
+
+```json
+{
+  "web": {
+    "enabled": true,
+    "bind": "127.0.0.1",
+    "port": 8090,
+    "username": "admin",
+    "password": "请在这里填入自己生成的高强度密码"
+  }
+}
+```
+
+请用 12 到 256 个字符的自定义初始密码替换示例值。建议将现有运营商配置和初始密码保存在权限为 `0600` 的 `config.json`，以可写目录挂载到容器。网页保存时会原子替换这个文件。登录后可在网页修改管理密码，首次改密后配置将保存盐值和 scrypt 哈希，并要求重新登录。
+
+### VyOS 挂载与访问
+
+将当前的 `config.json` 复制到新的配置目录，再编辑其中的 `web`。以下以 `/config/user-data/docker/hbiptv-epg` 为例，请按实际情况调整配置文件的源路径。
+
+```bash
+sudo install -d -m 0700 /config/user-data/docker/hbiptv-epg/config
+sudo install -m 0600 /config/user-data/docker/hbiptv-epg/config.json /config/user-data/docker/hbiptv-epg/config/config.json
+```
+
+拉取新版镜像后设置目录挂载。
+
+```text
+configure
+set container name hbiptv-epg volume config source '/config/user-data/docker/hbiptv-epg/config'
+set container name hbiptv-epg volume config destination '/run/iptv'
+set container name hbiptv-epg volume config mode 'rw'
+commit
+save
+exit
+```
+
+默认监听回环地址。从电脑通过 SSH 转发访问，例如 `ssh -N -L 8090:127.0.0.1:8090 vyos@192.168.15.1`，然后在浏览器打开 `http://127.0.0.1:8090`。如果需要在局域网直连，可以将 `web.bind` 设为 VyOS 的 LAN 地址并将端口访问限制到管理网段。通过 HTTPS 反向代理时可设置 `web.secure_cookie: true`。
+
+### 在页面中操作
+
+1. 选择电信、移动或联通，设置接口、fwmark 和运营商的鉴权字段。鉴权密码字段留空会保留已存密码。EPG 和 Logo 发布地址应用于三家运营商的 M3U。
+2. 点击「刷新频道」获取运营商频道，再勾选播放列表要收录的频道及各自的回看选项。新频道默认收录，有运营商回看地址时默认开启回看。保存后，生成 M3U 时应用选择。
+3. 单独执行「生成 EPG」「生成 M3U」或「下载 Logo」，任务结果出现在手动抓取面板。输出保存在 `/data/<运营商>/`，分别对应 `PL.xml` 与 `PL.xml.gz`、`rtp2http.m3u`、`logo/`。每天北京时间 04:00 的默认任务生成 EPG 和 M3U，Logo 手动下载。
+
+网页沿用运营商的接口和 fwmark 策略。白天手动抓取电信时，如果 DHCP 已换租，可先在 VyOS 运行路由准备脚本，再启动任务。
+
 ## 用 Docker Compose 运行
 
 从源码构建时运行：
@@ -163,6 +212,8 @@ docker compose logs -f epg
 ```
 
 第一次执行后可在 `data/` 核对产物。也可加 `--provider telecom`、`--provider cmcc` 或 `--provider unicom` 单独调试。定时服务默认每天北京时间 04:00 运行，可在 `.env` 设置 `EPG_RUN_AT=03:30` 后重新执行 `docker compose up -d epg`。个别运营商失败时，其他运营商仍会运行。空节目单不会覆盖上一版。
+
+如需 Web 管理，把现有配置放入 `config/config.json`，启用其中的 `web`，将 `compose.yaml` 的配置挂载改为 `./config:/run/iptv:rw`。保留数据挂载 `./data:/data`，然后重建服务容器。
 
 如果构建主机使用带自定义 CA 的出口代理，可使用宿主机已信任的 CA 构建：
 

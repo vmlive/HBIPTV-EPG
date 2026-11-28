@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HBIPTV EPG 管理</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div id="login-view" class="login-view">
+    <form id="login" class="panel login">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">▥</span> HBIPTV EPG</div>
+      <h1>登录管理台</h1>
+      <label>用户名<input name="username" autocomplete="username" value="admin" required></label>
+      <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+      <button class="primary" type="submit">登录</button>
+      <p id="login-status" class="message" role="status"></p>
+    </form>
+  </div>
+  <div id="console" hidden>
+    <header class="topbar">
+      <div class="shell header-row">
+        <div class="brand"><span class="brand-mark" aria-hidden="true">▥</span> HBIPTV EPG</div>
+        <div class="actions">
+          <button id="password-open" type="button" class="quiet">修改密码</button>
+          <button id="logout" type="button" class="quiet">退出</button>
+        </div>
+      </div>
+    </header>
+    <main class="shell layout">
+      <aside>
+        <h2 class="nav-label">运营商</h2>
+        <nav id="providers" aria-label="运营商"></nav>
+      </aside>
+      <div class="main">
+        <h1 id="provider-title">运营商管理</h1>
+        <p id="notice" class="message" role="status"></p>
+        <section class="panel">
+          <h2>手动抓取</h2>
+          <div class="actions" id="job-actions">
+            <button type="button" data-action="epg" class="primary">生成 EPG</button>
+            <button type="button" data-action="playlist">生成 M3U</button>
+            <button type="button" data-action="logos">下载 Logo</button>
+          </div>
+          <p id="job-status" class="message" role="status">当前没有手动任务</p>
+        </section>
+        <section class="panel">
+          <h2>连接设置</h2>
+          <form id="settings">
+            <label class="check enable"><input name="enabled" type="checkbox"> 启用该运营商</label>
+            <div class="fields">
+              <label>出站接口<input name="interface" placeholder="留空时使用系统路由" maxlength="15"></label>
+              <label>路由标记 fwmark<input name="fwmark" type="number" min="1" max="2147483647" placeholder="可留空"></label>
+              <label class="wide">EPG 和 Logo 发布地址（全局）
+                <input name="playlist_base_url" type="url" placeholder="留空时使用相对路径">
+              </label>
+            </div>
+            <h3>机顶盒鉴权</h3>
+            <div id="auth-main" class="fields"></div>
+            <details>
+              <summary>更多鉴权参数</summary>
+              <div id="auth-extra" class="fields"></div>
+            </details>
+            <div class="actions form-footer">
+              <button class="primary" type="submit">保存连接设置</button>
+              <p id="settings-status" class="message" role="status"></p>
+            </div>
+          </form>
+        </section>
+        <section class="panel channel-panel">
+          <div class="section-title">
+            <h2>播放列表频道</h2>
+            <button id="refresh-channels" type="button" data-action="channels">刷新频道</button>
+          </div>
+          <p class="description">勾选要写入 M3U 的频道。运营商提供回看地址时，可以单独开启回看。</p>
+          <div id="channel-empty" class="empty">刷新频道后可编辑播放列表。</div>
+          <div id="channel-list" hidden>
+            <div class="channel-tools">
+              <label class="search">筛选频道<input id="channel-filter" type="search" placeholder="频道名称、编号或分组"></label>
+              <div class="actions">
+                <button id="select-all" type="button" class="quiet">勾选筛选结果</button>
+                <button id="select-none" type="button" class="quiet">取消筛选结果</button>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th scope="col">播放</th><th scope="col">频道</th><th scope="col">分组</th><th scope="col">回看</th></tr></thead>
+                <tbody id="channel-rows"></tbody>
+              </table>
+            </div>
+            <p id="channel-count" class="description"></p>
+            <div class="actions form-footer">
+              <button id="save-channels" class="primary" type="button">保存频道选择</button>
+              <p id="channel-status" class="message" role="status"></p>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+  <dialog id="password-dialog" class="panel">
+    <h2>修改管理密码</h2>
+    <form id="password-form">
+      <label>当前密码<input name="current" type="password" autocomplete="current-password" required></label>
+      <label>新密码<input name="password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required></label>
+      <div class="actions">
+        <button type="submit" class="primary">保存并重新登录</button>
+        <button id="password-cancel" type="button">取消</button>
+      </div>
+      <p id="password-status" class="message" role="status"></p>
+    </form>
+  </dialog>
+</body>
+</html>

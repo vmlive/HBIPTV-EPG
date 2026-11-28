@@ -140,7 +140,7 @@ def extract_channel_from_response(text, *, unicom=False):
 
             timeshift_url_full = timeshift_url.group(1) if timeshift_url else None
 
-            if igmp_url and timeshift_url_full:
+            if igmp_url:
                 group = get_group_title(channel_name)
                 channel_info = {
                     'channel_id': channel_id,

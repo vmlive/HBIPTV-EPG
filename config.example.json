@@ -1,5 +1,12 @@
 {
   "playlist_base_url": null,
+  "web": {
+    "enabled": false,
+    "bind": "127.0.0.1",
+    "port": 8090,
+    "username": "admin",
+    "password": null
+  },
   "providers": {
     "telecom": {
       "enabled": true,

@@ -58,12 +58,21 @@ class IPTVFixture(BaseHTTPRequestHandler):
             )
         elif route.startswith("getchannellist"):
             method = "CUSetConfig" if route.endswith("HWCU.jsp") else "CTCSetConfig"
-            self.send_fixture(
-                f"Authentication.{method}('Channel','"
+            prefix = f"Authentication.{method}('Channel','"
+            channels = (
+                prefix +
                 'ChannelID="1",ChannelName="测试 & 频道",UserChannelID="101",'
                 'ChannelURL="igmp://239.1.2.3:1234",TimeShiftURL="rtsp://example.test/1"'
                 "');"
             )
+            if getattr(self.server, "extra_channels", False):
+                channels += (
+                    prefix + 'ChannelID="2",ChannelName="直播频道",UserChannelID="102",'
+                    'ChannelURL="igmp://239.1.2.4:1234"' "');" +
+                    prefix + 'ChannelID="3",ChannelName="备用频道",UserChannelID="103",'
+                    'ChannelURL="igmp://239.1.2.5:1234",TimeShiftURL="rtsp://example.test/3?source=iptv"' "');"
+                )
+            self.send_fixture(channels)
         elif route == "QueryPlaybillList":
             programme = {"startTime": "1760000000000", "name": "早间 & 新闻", "endTime": "1760003600000"}
             self.send_fixture("{}" if self.server.empty_guide else json.dumps(programme, ensure_ascii=False, separators=(",", ":")))
